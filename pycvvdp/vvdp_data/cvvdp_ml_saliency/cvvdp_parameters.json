@@ -62,6 +62,7 @@
     "dclamp_type": "soft",
     "d_max": 2.5642454624176025,
     "image_int": 0.6450030207633972,
-    "Bloch_int": "off",
-    "bfilt_duration": 0.4
+    "lum_adapt_reference": true
 }
+
+ 

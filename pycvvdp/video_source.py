@@ -1,5 +1,6 @@
 from abc import abstractmethod
 import torch
+import warnings
 import numpy as np
 import logging
 from torch import Tensor
@@ -25,9 +26,9 @@ class video_source:
     @abstractmethod
     def get_frames_per_second(self) -> float:
         pass
-
-    # Get a test video frame in the selected colorspace. See display_model.py->linear_2_target_colorspace
-    # for the list of available color spaces.
+    
+    # Get a test video frame with the index `frame_no`` in the selected colorspace.
+    # See display_model.py->linear_2_target_colorspace for the list of available color spaces.
     # You can also pass:
     # 'display_encoded_01', 'display_encoded_100nit' or 'display_encoded_dmax' for the method to return
     #  display-encoded image (e.g. sRGB) with the values between 0 and 1. If the input source contains linear
@@ -36,24 +37,24 @@ class video_source:
     # 'display_encoded_100nit' when the input is 100, the PU-encoded value is 1, the values can be >1
     # 'display_encoded_dmax' when the input is equal display peak luminance, the PU-encoded value is 1, the values can be >1
     @abstractmethod
-    def get_test_frame( self, frame, device, colorspace ) -> Tensor:
+    def get_test_frame( self, frame_no, device, colorspace ) -> Tensor:
         pass
 
     @abstractmethod
-    def get_reference_frame( self, frame, device, colorspace ) -> Tensor:
+    def get_reference_frame( self, frame_no, device, colorspace ) -> Tensor:
         pass
 
     # Check whether pixel values are valid, display warning if it is not the case
-    def check_if_valid( self, frame, target_colorspace ):
+    def check_if_valid( self, frame_no, target_colorspace ):
 
         if not hasattr( self, "warning_shown" ):
             self.warning_shown = False
 
-        if not self.warning_shown and torch.isnan(frame).flatten().any():
+        if not self.warning_shown and torch.isnan(frame_no).flatten().any():
             self.warning_shown = True
             logging.warning( 'Image contains one or more NaN values' )
 
-        if not self.warning_shown and torch.isinf(frame).flatten().any():
+        if not self.warning_shown and torch.isinf(frame_no).flatten().any():
             self.warning_shown = True
             logging.warning( 'Image contains one or more Inf values' )
 
@@ -62,9 +63,9 @@ class video_source:
 
         if self.first_frame and not target_colorspace.startswith('display_encoded') and not target_colorspace=='RGB2020pq':
             self.first_frame = False
-            f_mean = torch.mean(frame[:,0,:,:,:])
-            f_max = torch.max(frame[:,0,:,:,:])
-            f_min = torch.min(frame[:,0,:,:,:])
+            f_mean = torch.mean(frame_no[:,0,:,:,:])
+            f_max = torch.max(frame_no[:,0,:,:,:])
+            f_min = torch.min(frame_no[:,0,:,:,:])
             logging.debug( f"Content mean={f_mean}, max={f_max}, min={f_min}" )
 
             if not self.warning_shown and f_mean <= 1:
@@ -93,9 +94,9 @@ class video_source_filter(video_source):
     # Return the frame rate of the video
     def get_frames_per_second(self) -> float:
         return self.vs.get_frames_per_second()
-
-    # Get a test video frame in the selected colorspace. See display_model.py->linear_2_target_colorspace
-    # for the list of available color spaces.
+    
+    # Get a test video frame with the index `frame_no`` in the selected colorspace. 
+    # See display_model.py->linear_2_target_colorspace for the list of available color spaces. 
     # You can also pass:
     # 'display_encoded_01', 'display_encoded_100nit' or 'display_encoded_dmax' for the method to return
     #  display-encoded image (e.g. sRGB) with the values between 0 and 1. If the input source contains linear
@@ -103,11 +104,11 @@ class video_source_filter(video_source):
     # 'display_encoded_01' when the input is 0.005 to 10000, the PU-encoded values are between 0-1
     # 'display_encoded_100nit' when the input is 100, the PU-encoded value is 1, the values can be >1
     # 'display_encoded_dmax' when the input is equal display peak luminance, the PU-encoded value is 1, the values can be >1
-    def get_test_frame( self, frame, device, colorspace ) -> Tensor:
-        return self.vs.get_test_frame(frame, device, colorspace)
+    def get_test_frame( self, frame_no, device, colorspace ) -> Tensor:
+        return self.vs.get_test_frame(frame_no, device, colorspace)
 
-    def get_reference_frame( self, frame, device, colorspace ) -> Tensor:
-        return self.vs.get_reference_frame(frame, device, colorspace)
+    def get_reference_frame( self, frame_no, device, colorspace ) -> Tensor:
+        return self.vs.get_reference_frame(frame_no, device, colorspace)
 
 
 
@@ -198,24 +199,42 @@ def numpy2torch_frame(np_array, frame, device, dim_order="HWC" ):
 
 
 """
-This video_source uses a photometric display model to convert input content (e.g. sRGB) to luminance maps.
+This video_source uses a photometric display model to convert input content (e.g. sRGB) to the target color space used by the metric. 
+A separate model can be specified for test and reference content (as a tuple). If a single display_photometry is passed, the same model
+will be used for the test and reference.
 """
 class video_source_dm( video_source ):
 
-    def __init__( self,  display_photometry='sdr_4k_30', config_paths=[] ):
-
-        # self.color_trans = ColorTransform(color_space_name)
-
+    def _init_photometry(self, display_photometry, config_paths=[]):
         if isinstance( display_photometry, str ):
-            self.dm_photometry = vvdp_display_photometry.load(display_photometry, config_paths)
+            return vvdp_display_photometry.load(display_photometry, config_paths) 
         elif isinstance( display_photometry, vvdp_display_photometry ):
-            self.dm_photometry = display_photometry
+            return display_photometry
         else:
             raise RuntimeError( "display_model must be a string or fvvdp_display_photometry subclass" )
+        
 
-    def apply_dm_and_color_transform(self, frame, target_colorspace):
+    """
+    display_photometry can be: a string with the name of the display as listed in display_models.json; 
+    an object of display_photometry class; a touple or either strings or objects, where the first element 
+    of the tuple is used for the test content and the second for the reference content.
+    config_paths - a list of paths to folders or files where display_models.json can be found.
+    """
+    def __init__( self, display_photometry='sdr_4k_30', config_paths=[] ):
+        self.set_display_photometry( display_photometry, config_paths=config_paths )
 
-        I = self.dm_photometry.source_2_target_colorspace(frame, target_colorspace)
+    def set_display_photometry(self, display_photometry, config_paths=[] ):
+        if isinstance( display_photometry, tuple ):
+            assert len(display_photometry)==2, "Pass display photometry for the test and reference displays as a tuple."
+            self.dm_photometry = (self._init_photometry( display_photometry[0], config_paths=config_paths ), self._init_photometry( display_photometry[1], config_paths=config_paths ))
+        else:
+            dp = self._init_photometry( display_photometry, config_paths=config_paths )
+            self.dm_photometry = (dp, dp)
+
+    def apply_dm_and_color_transform(self, frame, target_colorspace, is_test):
+
+        pm_idx = 0 if is_test else 1
+        I = self.dm_photometry[pm_idx].source_2_target_colorspace(frame, target_colorspace)
 
         self.check_if_valid(I, target_colorspace)
         return I
@@ -253,21 +272,24 @@ class video_source_array( video_source_dm ):
         if len(dim_order) != len(test_video.shape):
             raise RuntimeError( 'Input tensor much have exactly as many dimensions as there are characters in the "dims" parameter' )
 
-        # Convert numpy arrays to tensors. Note that we do not upload to device or change dtype at this point (to save GPU memory)
-        if isinstance( test_video, np.ndarray ):
-            if test_video.dtype == np.uint16:
-                # Torch does not natively support uint16. A workaround is to pack uint16 values into int16.
-                # This will be efficiently transferred and unpacked on the GPU.
-                # logging.info('Test has datatype uint16, packing into int16')
-                test_video = test_video.astype(np.int16)
-            test_video = torch.tensor(test_video)
-        if isinstance( reference_video, np.ndarray ):
-            if reference_video.dtype == np.uint16:
-                # Torch does not natively support uint16. A workaround is to pack uint16 values into int16.
-                # This will be efficiently transferred and unpacked on the GPU.
-                # logging.info('Reference has datatype uint16, packing into int16')
-                reference_video = reference_video.astype(np.int16)
-            reference_video = torch.tensor(reference_video)
+        with warnings.catch_warnings():
+            # We sometime pass memmap arrays, which are not writeable. Ignore the warning as we do not write to the input array.
+            warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+            # Convert numpy arrays to tensors. Note that we do not upload to device or change dtype at this point (to save GPU memory)
+            if isinstance( test_video, np.ndarray ):
+                if test_video.dtype == np.uint16:
+                    # Torch does not natively support uint16. A workaround is to pack uint16 values into int16.
+                    # This will be efficiently transferred and unpacked on the GPU.
+                    # logging.info('Test has datatype uint16, packing into int16')
+                    test_video = test_video.astype(np.int16)
+                test_video = torch.as_tensor(test_video)
+            if isinstance( reference_video, np.ndarray ):
+                if reference_video.dtype == np.uint16:
+                    # Torch does not natively support uint16. A workaround is to pack uint16 values into int16.
+                    # This will be efficiently transferred and unpacked on the GPU.
+                    # logging.info('Reference has datatype uint16, packing into int16')
+                    reference_video = reference_video.astype(np.int16)
+                reference_video = torch.as_tensor(reference_video)
 
         # Change the order of dimension to match BFCHW - batch, frame, color, height, width
         test_video = reshuffle_dims( test_video, in_dims=dim_order, out_dims="BCFHW" )
@@ -310,20 +332,20 @@ class video_source_array( video_source_dm ):
     # starting from 0. If use_gpu==true, the function should return a
     # gpuArray.
 
-    def get_test_frame( self, frame, device, colorspace ):
-        return self._get_frame(self.test_video, frame, device, colorspace )
+    def get_test_frame( self, frame_no, device, colorspace ):
+        return self._get_frame(self.test_video, frame_no, device, colorspace, is_test=True )
 
-    def get_reference_frame( self, frame, device, colorspace ):
-        return self._get_frame(self.reference_video, frame, device, colorspace )
+    def get_reference_frame( self, frame_no, device, colorspace ):
+        return self._get_frame(self.reference_video, frame_no, device, colorspace, is_test=False )
 
-    def _get_frame( self, from_array, frame, device, colorspace ):
+    def _get_frame( self, from_array, frame_no, device, colorspace, is_test ):
         # Determine the maximum value of the data type storing the
         # image/video
 
         if from_array.dtype is torch.float32:
-            frame = from_array[:,:,frame:(frame+1),:,:].to(device)
+            frame = from_array[:,:,frame_no:(frame_no+1),:,:].to(device)
         elif from_array.dtype is torch.float16:
-            frame = from_array[:,:,frame:(frame+1),:,:].to(device=device, dtype=torch.float32)
+            frame = from_array[:,:,frame_no:(frame_no+1),:,:].to(device=device, dtype=torch.float32)
         elif from_array.dtype is torch.int16:
             # Use int16 to losslessly pack uint16 values
             # Unpack from int16 by bit masking as described in this thread:
@@ -331,17 +353,17 @@ class video_source_array( video_source_dm ):
             # logging.info('Found int16 datatype, unpack into uint16')
             max_value = 2**16 - 1
             # Cast to int32 to store values >= 2**15
-            frame_int32 = from_array[:,:,frame:(frame+1),:,:].to(device).to(torch.int32)
+            frame_int32 = from_array[:,:,frame_no:(frame_no+1),:,:].to(device).to(torch.int32)
             frame_uint16 = frame_int32 & max_value
             # Finally convert to float in the range [0,1]
             frame = frame_uint16.to(torch.float32) / max_value
         elif from_array.dtype is torch.uint8:
-            frame = from_array[:,:,frame:(frame+1),:,:].to(device).to(torch.float32)/255
+            frame = from_array[:,:,frame_no:(frame_no+1),:,:].to(device).to(torch.float32)/255
         else:
             raise RuntimeError( f"Only uint8, uint16 and float32 is currently supported. {from_array.dtype} encountered." )
 
-        I = self.apply_dm_and_color_transform(frame, colorspace)
-
+        I = self.apply_dm_and_color_transform(frame, colorspace, is_test)
+        
         return I
 
 
@@ -366,13 +388,13 @@ class video_source_packed_array( video_source_dm ):
         n, _, _, _, _, h, w = map(int, self.test_video[:7])
         return h, w, n
 
-    def get_test_frame(self, frame, device):
-        return self._get_frame(self.test_video, frame, device)
+    def get_test_frame(self, frame_no, device):
+        return self._get_frame(self.test_video, frame_no, device, is_test=True)
 
-    def get_reference_frame(self, frame, device):
-        return self._get_frame(self.reference_video, frame, device)
+    def get_reference_frame(self, frame_no, device):
+        return self._get_frame(self.reference_video, frame_no, device, is_test=False)
 
-    def _get_frame(self, from_array, idx, device):
+    def _get_frame(self, from_array, idx, device, is_test):
         n, h, w, bit_depth, chroma_ss, resize_h, resize_w = map(int, from_array[:7])
         if self.yuv:
             y_pixels = h*w
@@ -420,7 +442,8 @@ class video_source_packed_array( video_source_dm ):
             frame = frame.reshape(resize_h, resize_w, 3) / max_value
             frame = frame.permute(2,0,1).reshape(1, -1, 1, resize_h, resize_w)
 
-        L = self.dm_photometry.forward( frame )
+        pm_idx = 0 if is_test else 1
+        L = self.dm_photometry[pm_idx].forward( frame )
 
         if L.shape[1] == 3:
             # Convert to grayscale

@@ -77,12 +77,12 @@ class cvvdp_ml_base(cvvdp):
 
     # use_checkpoints - this is for memory-efficient gradient propagation (to be used with stage1 training only)
     # random_init - do not load NN from a checkpoint file, use a random initialization
-    def __init__(self, random_init = False, disabled_features=None, **kwargs):
+    def __init__(self, config_paths=[], random_init = False, disabled_features=None, **kwargs):
 
         self.random_init = random_init
         self.disabled_features = disabled_features
 
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, config_paths=config_paths)
 
         if self.heatmap is not None and self.heatmap!='none':
             raise vq_exception( "Currently cvvdp-ml metrics do not produce heatmaps" )
@@ -138,7 +138,7 @@ class cvvdp_ml_base(cvvdp):
                 getattr(self, net).load_state_dict(state_dict)
                 #.to(device=self.device)
 
-    def predict_video_source(self, vid_source):
+    def predict_video_source(self, vid_source, heatmap_file=None):
         # We assume the pytorch default NCDHW layout
 
         assert vid_source.get_batch_size()==1 or self.heatmap is None or self.heatmap=='none', 'Heatmaps not supported when batches are used'
@@ -301,27 +301,20 @@ class cvvdp_ml_base(cvvdp):
             logL_bkg = lpyr.get_gband(L_bkg_pyr, bb)
 
             # Compute CSF
-            rho = rho_band[bb] # Spatial frequency in cpd
-            ch_height, ch_width = logL_bkg.shape[-2], logL_bkg.shape[-1]
-            S = torch.empty((batch_sz,all_ch,block_N_frames,ch_height,ch_width), device=self.device)
-            for cc in range(all_ch):
-                tch = 0 if cc<3 else 1  # Sustained or transient
-                cch = cc if cc<3 else 0 # Y, rg, yv
-                # The sensitivity is always extracted for the reference frame
-                S[:,cc:(cc+1),:,:,:] = self.csf.sensitivity(rho, self.omega[tch], logL_bkg[...,1:2,:,:,:], cch, self.csf_sigma) * 10.0**(self.sensitivity_correction/20.0)
+            (S_test, S_ref) = self.compute_CSF( bb, logL_bkg, rho_band, batch_sz, all_ch, block_N_frames )
 
             if is_baseband:
-                D = (torch.abs(T_f-R_f) * S)
+                D = torch.abs(T_f*S_test-R_f*S_ref)
             else:
                 # dimensions: [channel,frame,height,width]
-                D = self.apply_masking_model(T_f, R_f, S)
+                D = self.apply_masking_model(T_f, R_f, S_test, S_ref)
 
             #width = R.shape[-1]
             #feature_size = math.ceil(self.pix_per_deg * ch_width / width)
             feature_size = math.ceil(self.pix_per_deg)
 
             fp = cvvdp_feature_pooling(feature_size)
-            features_block[bb] = fp( torch.abs(T_f)*S, torch.abs(R_f)*S, D )
+            features_block[bb] = fp( torch.abs(T_f)*S_test, torch.abs(R_f)*S_ref, D )
 
             # if bb>6:
             #     Q_per_ch_block[:,:,bb] = 0

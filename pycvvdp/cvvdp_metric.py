@@ -3,6 +3,7 @@ import torch
 from torch.utils import checkpoint
 from torch import Tensor
 from torchvision.transforms import GaussianBlur
+import torch.nn.functional as Func
 import numpy as np
 import os
 import json
@@ -59,6 +60,37 @@ from pycvvdp.csf import castleCSF
 #     for obj in objs_sorted:
 #         print( obj[1] )
 
+class SeparableGaussianBlur:
+    """
+    Compute two sequential orthogonal 1D convolutions.
+    Faster than performing one 2D convolution.
+    """
+
+    def __init__(self, kernel_size, sigma, device=None, dtype=torch.float32):
+        k = int(kernel_size)
+        half = (k - 1) * 0.5
+        x = torch.linspace(-half, half, k, device=device, dtype=dtype)
+        pdf = torch.exp(-0.5 * (x / float(sigma)) ** 2)
+        k1d = pdf / pdf.sum()
+        self.pad = (k // 2,) * 4  # (left, right, top, bottom)
+        self.k_vert = k1d.view(1, 1, k, 1)
+        self.k_horiz = k1d.view(1, 1, 1, k)
+
+    def to(self, device):
+        self.k_vert = self.k_vert.to(device)
+        self.k_horiz = self.k_horiz.to(device)
+        return self
+
+    def forward(self, img):  # img: (N, 1, H, W)
+        x = Func.pad(img, self.pad, mode="reflect")
+        x = Func.conv2d(x, self.k_vert)
+        x = Func.conv2d(x, self.k_horiz)
+        return x
+
+    __call__ = forward
+
+
+
 # A differentiable variant of a power function
 def safe_pow( x:Tensor, p ):
     #assert (not x.isnan().any()) and (not x.isinf().any()), "Must not be nan"
@@ -89,13 +121,24 @@ class cvvdp_frame_buffers:
 
 
 """
-ColorVideoVDP metric. Refer to pytorch_examples for examples on how to use this class.
+ColorVideoVDP metric. Refer to pytorch_examples for examples on how to use this class. 
+
+spatial_padding - how to pad areas outside the image when computing a multi-scale decomposition. 
+    Pass: "zero" - zero padding, "symmetric" - mirror-like reflection, "valid" - ignore edges, None - use model's default (recommended)
+
+temp_padding - how to pad frames before the first frame in the sequence when computing temporal filters. 
+    Pass: "replicate" - repeat the first frame, "symmetric" - mirror-like reflection, None - use model's default (recommended)
 """
 class cvvdp(vq_metric):
-    def __init__(self, display_name="standard_4k", display_photometry=None, display_geometry=None, config_paths=[], heatmap=None, quiet=False, device=None, temp_padding="replicate", use_checkpoints=False, dump_channels=None, gpu_mem = None):
+    def __init__(self, display_name="standard_4k", display_photometry=None, display_geometry=None, config_paths=[], 
+                 heatmap=None, quiet=False, device=None, temp_padding=None, spatial_padding=None, use_checkpoints=False, 
+                 dump_channels=None, gpu_mem = None):
         self.quiet = quiet
         self.heatmap = heatmap
+        self.heatmap_file = None
+        self.heatmap_vw = None
         self.temp_padding = temp_padding
+        self.spatial_padding = spatial_padding
         self.use_checkpoints = use_checkpoints # Used for end-to-end training, these are NOT model checkpoints
         self.gpu_mem = gpu_mem # how many GB of memory we are allowed to use
         self.training_mode = False
@@ -143,7 +186,7 @@ class cvvdp(vq_metric):
         self.mask_c = torch.as_tensor( parameters['mask_c'], device=self.device ) # content masking adjustment
         self.pu_dilate = parameters['pu_dilate']
         if self.pu_dilate>0:
-            self.pu_blur = GaussianBlur(int(self.pu_dilate*4)+1, self.pu_dilate)
+            self.pu_blur = SeparableGaussianBlur(int(self.pu_dilate*4)+1, self.pu_dilate, device=self.device)
             self.pu_padsize = int(self.pu_dilate*2)
 
         self.beta = torch.as_tensor( parameters['beta'], device=self.device ) # The exponent of the spatial summation (p-norm)
@@ -163,6 +206,10 @@ class cvvdp(vq_metric):
         self.contrast = parameters['contrast']  # One of: 'weber_g0_ref', 'weber_g1_ref', 'weber_g1', 'log'
         self.jod_a = torch.as_tensor( parameters['jod_a'], device=self.device )
         self.jod_exp = torch.as_tensor( parameters['jod_exp'], device=self.device )
+        if self.spatial_padding is None:
+            self.spatial_padding = parameters.get( 'spatial_padding', 'symmetric' )
+        if self.temp_padding is None:
+            self.temp_padding = parameters.get( 'temp_padding', 'symmetric' )
 
         if 'ce_g' in parameters:
             self.ce_g = torch.as_tensor( parameters['ce_g'], device=self.device )
@@ -182,8 +229,9 @@ class cvvdp(vq_metric):
             self.mask_q_trans = torch.as_tensor( parameters['mask_q_trans'], device=self.device )
         self.filter_len = torch.as_tensor( parameters['filter_len'], device=self.device )
 
-        self.do_xchannel_masking = True if parameters['xchannel_masking'] == "on" else False
+        self.do_xchannel_masking = False if parameters['xchannel_masking'] == "off" else True
         self.xcm_weights = torch.as_tensor( parameters['xcm_weights'], device=self.device, dtype=torch.float32 )
+        # Precompute the cross-channel masking weights (constant per model); consumed by mask_pool's einsum.
 
         self.image_int = torch.as_tensor( parameters['image_int'], device=self.device )
 
@@ -201,8 +249,12 @@ class cvvdp(vq_metric):
         #     self.baseband_weight = self.baseband_weight.repeat(4)
         self.dclamp_type = parameters['dclamp_type']  # clamping mode: soft or hard
         self.d_max = torch.as_tensor( parameters['d_max'], device=self.device ) # Clamping of difference values
+        # Precompute elementwise powers
+        self.mask_c_pow = 10.0**self.mask_c
+        self.d_max_pow = 10.0**self.d_max
         self.version = parameters['version']
 
+        self.lum_adapt_reference = parameters.get( 'lum_adapt_reference', True )
         self.omega = [0, 5]
 
         self.csf = castleCSF(csf_version=self.csf, device=self.device, config_paths=config_paths)
@@ -267,11 +319,11 @@ class cvvdp(vq_metric):
           'replicate' - replicate the first frame (default)
           'symmetric'  - the video frames are mirrored so that frames -1, -2, ... correspond to frames 0, 1, ...
     '''
-    def predict(self, test_cont, reference_cont, dim_order="BCFHW", frames_per_second=0):
+    def predict(self, test_cont, reference_cont, dim_order="BCFHW", frames_per_second=0, heatmap_file=None):
 
         test_vs = video_source_array( test_cont, reference_cont, frames_per_second, dim_order=dim_order, display_photometry=self.display_photometry )
 
-        return self.predict_video_source(test_vs)
+        return self.predict_video_source(test_vs, heatmap_file=heatmap_file)
 
     '''
     Compute a loss function between test and reference images/videos. Used as an optimization term in which the loss is minimized.
@@ -286,8 +338,10 @@ class cvvdp(vq_metric):
     '''
     The same as `predict` but takes as input fvvdp_video_source_* object instead of Numpy/Pytorch arrays. Video source is recommended when processing long videos as it allows frame-by-frame loading.
     '''
-    def predict_video_source(self, vid_source):
+    def predict_video_source(self, vid_source, heatmap_file=None ):
         # We assume the pytorch default NCDHW layout
+
+        self.heatmap_file = heatmap_file
 
         vid_sz = vid_source.get_video_size() # H, W, F
         height, width, N_frames = vid_sz
@@ -303,7 +357,7 @@ class cvvdp(vq_metric):
 
         if self.lpyr is None or self.lpyr.W!=width or self.lpyr.H!=height:
             if self.contrast.startswith("weber"):
-                self.lpyr = weber_contrast_pyr(width, height, self.pix_per_deg, self.device, contrast=self.contrast)
+                self.lpyr = weber_contrast_pyr(width, height, self.pix_per_deg, self.device, contrast=self.contrast, padding_type=self.spatial_padding)
             elif self.contrast.startswith("log"):
                 self.lpyr = log_contrast_pyr(width, height, self.pix_per_deg, self.device, contrast=self.contrast)
             else:
@@ -326,7 +380,7 @@ class cvvdp(vq_metric):
 
         no_channels = 2+temp_ch
 
-        if self.do_heatmap:
+        if self.do_heatmap and self.heatmap_file is None:
             dmap_channels = 1 if self.heatmap == "raw" else 3
             heatmap = torch.zeros([1,dmap_channels,N_frames,height,width], dtype=torch.float16, device=torch.device('cpu')) # Store heatmap in the CPU memory
         else:
@@ -337,9 +391,12 @@ class cvvdp(vq_metric):
         if self.device.type == 'cuda' and torch.cuda.is_available() and not is_image:
             # GPU utilization is better if we process many frames, but it requires more GPU memory
             pix_cnt = width*height*batch_sz
-            block_N_frames = self.estimate_block_N(pix_cnt, N_frames)
+            block_N_frames = max(1, min(self.estimate_block_N(pix_cnt, self.filter_len), N_frames))
         else:
             block_N_frames = 1
+
+        if self.debug:
+            logging.debug( f"Processing a block of {block_N_frames} frames at a time.")
 
         # block_N_frames = min(block_N_frames,1)
         # print( f'Block of frames: {block_N_frames}')
@@ -382,10 +439,26 @@ class cvvdp(vq_metric):
 
             if self.do_heatmap:
                 if self.heatmap == "raw":
-                    heatmap[:,:,ff:ff_end,...] = heatmap_block.detach().type(torch.float16).cpu()
+                    heatmap_vis = heatmap_block[0,...].detach()
                 else:
                     ref_frame = R[:,0, :, :, :]
-                    heatmap[:,:,ff:ff_end,...] = visualize_diff_map(heatmap_block, context_image=ref_frame, colormap_type=self.heatmap, use_cpu=self.device.type == 'mps').detach().type(torch.float16).cpu()
+                    heatmap_vis = visualize_diff_map(heatmap_block, context_image=ref_frame, colormap_type=self.heatmap, use_cpu=self.device.type == 'mps').detach()
+
+                if self.heatmap_file is None:
+                    heatmap[:,:,ff:ff_end,...] = heatmap_vis.type(torch.float16).cpu()
+                else:
+                    if self.heatmap_vw is None:
+                        if is_image:
+                            self.heatmap_vw = ImageWriter( self.heatmap_file )
+                        else:
+                            self.heatmap_vw = VideoWriter( self.heatmap_file, hdr_mode=False, fps=vid_source.get_frames_per_second() )
+    
+                    for kk in range(heatmap_vis.shape[1]):
+                        if heatmap_vis.shape[0]==1: # grayscale heatmap
+                            self.heatmap_vw.write_frame_rgb((heatmap_vis[:,kk,:,:]/10).view((height,width,1)).tile((1,1,3)).cpu().numpy())
+                        else:
+                            self.heatmap_vw.write_frame_rgb(heatmap_vis[:,kk,:,:].permute((1,2,0)).cpu().numpy())
+
 
         if self.temp_resample: # This may not be needed anymore
             t_end = N_frames/vid_source.get_frames_per_second() # Video duration in s
@@ -413,17 +486,24 @@ class cvvdp(vq_metric):
         if self.dump_channels:
             self.dump_channels.close()
 
-        if self.do_heatmap:
+        if self.heatmap_vw is not None:
+            self.heatmap_vw.close()
+
+        if heatmap is not None:
             stats['heatmap'] = heatmap
 
         if self.debug:
             logging.debug( f"Processing {block_N_frames} frames in a batch." )
+            logging.debug( f"Filter length {self.filter_len} frames." )
             logging.debug( f"Resolution: {width}x{height} = {width*height/1e6} Mpixels" )
-            # mem_allocated_peak = torch.cuda.max_memory_allocated(self.device)
+            # mem_allocated_peak = torch.cuda.max_memory_allocated(self.device)            
             # logging.debug( f"Memory allocated at start: {self.start_allocated/1e9} GB" )
             if hasattr( self, "sw_buf_allocated" ):
                 logging.debug( f"Memory allocated for temp. filter buffers: {self.sw_buf_allocated/1e9} GB" )
             logging.debug( f"Max memory allocated: {torch.cuda.max_memory_allocated()/1e9} GB" )
+            # The model is:  total_mem = a + pix_cnt*(block_N_frames+filter_len-1)*b + pix_cnt*block_N_frames*c
+
+
 
         return (Q_jod.squeeze(), stats)
 
@@ -447,7 +527,7 @@ class cvvdp(vq_metric):
         is_image = (N_frames==1)  # Can run faster on images
 
         if is_image:
-            R = torch.zeros((batch_sz, 6, 1, height, width), device=self.device)
+            R = torch.empty((batch_sz, 6, 1, height, width), device=self.device)
             R[:,0::2, :, :, :] = vid_source.get_test_frame(0, device=self.device, colorspace=met_colorspace)
             R[:,1::2, :, :, :] = vid_source.get_reference_frame(0, device=self.device, colorspace=met_colorspace)
 
@@ -535,8 +615,8 @@ class cvvdp(vq_metric):
                             fb.sw_buf[0][:,:,ind:ind+1,:,:] = vid_source.get_test_frame(ff+fi, device=self.device, colorspace=met_colorspace)
                             fb.sw_buf[1][:,:,ind:ind+1,:,:] = vid_source.get_reference_frame(ff+fi, device=self.device, colorspace=met_colorspace)
 
-                    # Order: test-sustained-Y, ref-sustained-Y, test-rg, ref-rg, test-yv, ref-yv, test-transient-Y, ref-transient-Y
-                    # Images do not have the two last channels
+                # Channel order: test-sustained-Y, ref-sustained-Y, test-rg, ref-rg, test-yv, ref-yv, test-transient-Y, ref-transient-Y
+                # Images do not have the two last channels
                 R = torch.zeros((batch_sz, 8, cur_block_N_frames, height, width), device=self.device)
 
                 for cc in range(no_channels): # Iterate over chromatic and temporal channels
@@ -550,35 +630,46 @@ class cvvdp(vq_metric):
 
     # Determine how many frames we can process in a single batch
     # Larger batch means faster processing, but it requires more memory
-    def estimate_block_N(self, pix_cnt, N_frames):
+    def estimate_block_N(self, pix_cnt, filter_len):
         # Determine how much memory we have
+        free, _ = torch.cuda.mem_get_info()
+        cached = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+        mem_avail_pytorch = free + cached 
+
         if has_nvml:
-            # This is more accurate estimate
+            # This is a more accurate estimate
             nvmlInit()
             dev_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
             h = nvmlDeviceGetHandleByIndex(dev_index)
             info = nvmlDeviceGetMemoryInfo(h)
-            mem_avail = info.free - 1e9  # We reserving some space, not to use all the memory
+            cached = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+            mem_avail_nvml = info.free + cached  
+            mem_avail = min( mem_avail_nvml, mem_avail_pytorch)
         else:
-            # Torch does not allow us to querry the free memory on the GPU so this is an inaccurate estimate - likely to fail if other applications are using a GPU
-            total = torch.cuda.get_device_properties(self.device).total_memory
-            allocated = torch.cuda.memory_allocated(self.device)
-            mem_avail = total-allocated - 2e9  # Total available minus 2G (used by other apps)
+            mem_avail = mem_avail_pytorch
+            mem_avail_nvml = None
 
         if not self.gpu_mem is None:
             mem_avail = min(int(self.gpu_mem*1e9), mem_avail)
 
-        if self.debug:
-            logging.debug( f"Available memory: {mem_avail/1e9} GB")
         # Estimate how much we need for processing
-        # The model is:  total_mem = a + pix_cnt*(N_frames+filter_len-1)*b + pix_cnt*N_frames*c
+        # The model is:  total_mem = a + pix_cnt*(block_N_frames+filter_len-1)*b + pix_cnt*block_N_frames*c
         a = 1.6e9
-        b = 16
-        c = 320 if not self.training_mode else 800 # A different value for training
+        b = 12 # 3 channel x 4-byte float
+        if os.name == 'nt': # For some reason, more memory is consumed on Windows
+            c = 450 if not self.training_mode else 800 # A different value for training
+        else:
+            c = 400 if not self.training_mode else 800 # A different value for training
 
-        max_frames = int(math.floor((mem_avail-a-pix_cnt*(self.filter_len-1)*b)/(pix_cnt*b+pix_cnt*c))) # how many frames can we fit into memory
 
-        block_N_frames = max(1, min(max_frames,N_frames))  # Process so many frames in one pass
+        block_N_frames = int(math.floor((mem_avail-a-pix_cnt*(filter_len-1)*b)/(pix_cnt*b+pix_cnt*c))) # how many frames can we fit into memory
+
+        if self.debug:
+            logging.debug( f"Available memory (PyTorch): {mem_avail_pytorch/1e9} GB")            
+            logging.debug( f"Available memory (NVML): {mem_avail_nvml/1e9} GB")
+            total_mem_est = a + pix_cnt*(block_N_frames+filter_len-1)*b + pix_cnt*block_N_frames*c
+            logging.debug( f"Estimated memory use: {total_mem_est/1e9} GB")
+
         return block_N_frames
 
 
@@ -646,8 +737,32 @@ class cvvdp(vq_metric):
         Q_JOD[Q>Q_t] = 10. - self.jod_a * (Q[Q>Q_t]**self.jod_exp)
         return Q_JOD
 
+    def compute_CSF( self, bb, logL_bkg, rho_band, batch_sz, all_ch, block_N_frames ):
+        rho = rho_band[bb] # Spatial frequency in cpd
+        ch_height, ch_width = logL_bkg.shape[-2], logL_bkg.shape[-1]
+        S_ref = torch.empty((batch_sz,all_ch,block_N_frames,ch_height,ch_width), device=self.device)
+        if self.lum_adapt_reference: # For backward compatibility
+            S_test = S_ref
+        else:
+            S_test = torch.empty((batch_sz,all_ch,block_N_frames,ch_height,ch_width), device=self.device)
+        for cc in range(all_ch):
+            tch = 0 if cc<3 else 1  # Sustained or transient
+            cch = cc if cc<3 else 0 # Y, rg, yv
+            if self.lum_adapt_reference:
+                # The sensitivity is computed assuming the adaptation to the luminance of the sustained channel of the reference image only
+                S_ref[:,cc:(cc+1),:,:,:] = self.csf.sensitivity(rho, self.omega[tch], logL_bkg[...,1:2,:,:,:], cch, self.csf_sigma) * 10.0**(self.sensitivity_correction/20.0)
+            else:
+                # The sensitivity is computed assuming the adaptation to the lumiance of the sustained channel of either the test or reference image
+                S_both = self.csf.sensitivity(rho, self.omega[tch], logL_bkg[...,0:2,:,:,:], cch, self.csf_sigma) * 10.0**(self.sensitivity_correction/20.0)
+                S_test[:,cc:(cc+1),:,:,:] = S_both[:,0:1,:,:,:]
+                S_ref[:,cc:(cc+1),:,:,:] = S_both[:,1:2,:,:,:]
+        return (S_test, S_ref)
+
+    # @torch.compile
     def process_block_of_frames(self, R, vid_sz, temp_ch, lpyr, is_image):
         # R[batch,channels,frames,width,height]
+        # Channel order: test-sustained-Y, ref-sustained-Y, test-rg, ref-rg, test-yv, ref-yv, test-transient-Y, ref-transient-Y
+        # Images do not have the two last channels
         #height, width, N_frames = vid_sz
         all_ch = 2+temp_ch
         batch_sz = R.shape[0]
@@ -688,20 +803,13 @@ class cvvdp(vq_metric):
             logL_bkg = lpyr.get_gband(L_bkg_pyr, bb)
 
             # Compute CSF
-            rho = rho_band[bb] # Spatial frequency in cpd
-            ch_height, ch_width = logL_bkg.shape[-2], logL_bkg.shape[-1]
-            S = torch.empty((batch_sz,all_ch,block_N_frames,ch_height,ch_width), device=self.device)
-            for cc in range(all_ch):
-                tch = 0 if cc<3 else 1  # Sustained or transient
-                cch = cc if cc<3 else 0 # Y, rg, yv
-                # The sensitivity is always extracted for the reference frame
-                S[:,cc:(cc+1),:,:,:] = self.csf.sensitivity(rho, self.omega[tch], logL_bkg[...,1:2,:,:,:], cch, self.csf_sigma) * 10.0**(self.sensitivity_correction/20.0)
+            (S_test, S_ref) = self.compute_CSF( bb, logL_bkg, rho_band, batch_sz, all_ch, block_N_frames )
 
             if is_baseband:
-                D = (torch.abs(T_f-R_f) * S)
+                D = torch.abs(T_f*S_test-R_f*S_ref)
             else:
                 # dimensions: [channel,frame,height,width]
-                D = self.apply_masking_model(T_f, R_f, S)
+                D = self.apply_masking_model(T_f, R_f, S_test, S_ref)
 
             if Q_per_ch_block is None:
                 Q_per_ch_block = torch.empty((batch_sz,all_ch, block_N_frames, lpyr.get_band_count()), device=self.device)
@@ -727,7 +835,7 @@ class cvvdp(vq_metric):
                 height = R.shape[-2]
                 t_int = self.image_int if is_image else 1.0
                 per_ch_w = self.get_ch_weights( all_ch ).view(-1,1,1,1) * t_int
-                self.dump_channels.set_diff_band(width, height, lpyr.ppd, bb, D*per_ch_w)
+                self.dump_channels.set_diff_band(width, height, lpyr.ppd, bb, D*per_ch_w, padding_type=self.spatial_padding)
 
         if self.do_heatmap:
             heatmap_block = 1.-(self.met2jod( self.heatmap_pyr.reconstruct() )/10.)
@@ -743,10 +851,9 @@ class cvvdp(vq_metric):
         # Cross-channel masking
         num_ch = C.shape[-4]
         if self.do_xchannel_masking:
-            M = torch.empty_like(C)
-            xcm_weights = torch.reshape( (2**self.xcm_weights), (4,4) )[:num_ch,:]
-            for cc in range(num_ch): # for each channel: Sust, RG, VY, Trans
-                M[:,cc:(cc+1),...] = torch.sum( C * xcm_weights[:,cc].view(1,-1,1,1,1), dim=-4, keepdim=True )
+            self.xcm_pow = 2**self.xcm_weights
+            W = torch.reshape(self.xcm_pow, (4, 4))[:num_ch, :num_ch]
+            M = torch.einsum('bkfhw,kc->bcfhw', C, W)
         else:
             cm_weights = torch.reshape( (2**self.xcm_weights), (1,4,1,1,1) )[:,:num_ch,...]
             M = C * cm_weights
@@ -792,7 +899,7 @@ class cvvdp(vq_metric):
 
         M = self.phase_uncertainty(self.mask_pool(safe_pow(torch.abs(C_p),q)))
 
-        D_max = 10**self.d_max
+        D_max = self.d_max_pow
 
         return D_max * pow_neg( C_p, p ) / (0.2 + M)
 
@@ -803,7 +910,7 @@ class cvvdp(vq_metric):
         else:
             return torch.sign(x)
 
-    def apply_masking_model(self, T, R, S):
+    def apply_masking_model(self, T, R, S_test, S_ref):
         # T - test contrast tensor T[batch,channel,frame,width,height]
         # R - reference contrast tensor
         # S - sensitivity
@@ -812,18 +919,19 @@ class cvvdp(vq_metric):
             num_ch = T.shape[-4]
             if self.masking_model.startswith( "add" ):
                 zero_tens = torch.as_tensor(0., device=T.device)
-                ch_gain = self.ce_g * torch.reshape( torch.as_tensor( [1, 1.7, 0.237, 1.], device=T.device), (1, 4, 1, 1, 1) )[:,:num_ch,...]
-                C_t = 1/S
+                ch_gain = self.ce_g * torch.reshape( torch.as_tensor( [1, 1.7, 0.237, 1.], device=T.device), (1, 4, 1, 1, 1) )[:,:num_ch,...] 
+                C_t = 1/S_test
+                C_r = 1/S_ref
                 T_p = self.diff_sign(T) * torch.maximum( (torch.abs(T)-C_t)*ch_gain + 1, zero_tens )
-                R_p = self.diff_sign(R) * torch.maximum( (torch.abs(R)-C_t)*ch_gain + 1, zero_tens )
+                R_p = self.diff_sign(R) * torch.maximum( (torch.abs(R)-C_r)*ch_gain + 1, zero_tens )
             else:
                 if self.masking_model.endswith( "mutual-old" ):
-                    T_p = T * S
-                    R_p = R * S
+                    T_p = T * S_test
+                    R_p = R * S_ref
                 else:
-                    ch_gain = torch.reshape( torch.as_tensor( [1, 1.45, 1, 1.], device=T.device), (1, 4, 1, 1, 1) )[:,:num_ch,...]
-                    T_p = T * S * ch_gain
-                    R_p = R * S * ch_gain
+                    ch_gain = torch.reshape( torch.as_tensor( [1, 1.45, 1, 1.], device=T.device), (1, 4, 1, 1, 1) )[:,:num_ch,...] 
+                    T_p = T * S_test * ch_gain
+                    R_p = R * S_ref * ch_gain
 
             if self.masking_model.endswith( "none" ):
                 D = self.clamp_diffs(torch.abs(T_p-R_p))
@@ -835,7 +943,7 @@ class cvvdp(vq_metric):
                 p = self.mask_p
                 q = self.mask_q[0:num_ch].view(num_ch,1,1,1)
 
-                M = self.mask_pool(safe_pow(torch.abs(M_mm),q))
+                M = self.mask_pool(safe_pow(M_mm,q))
 
                 #D_band = safe_pow(torch.abs(T_p - R_p),p)
                 # k_c = self.k_c
@@ -886,8 +994,8 @@ class cvvdp(vq_metric):
             else: # similarity
                 T_p_m = self.phase_uncertainty(self.mask_pool(torch.abs(T_p)))
                 R_p_m = self.phase_uncertainty(self.mask_pool(torch.abs(R_p)))
-
-                D_max = 10**self.d_max
+    
+                D_max = self.d_max_pow
                 epsilon = D_max-1
 
                 D = D_max - D_max*(2*torch.abs(T_p)*torch.abs(R_p)+epsilon)/(T_p_m*T_p_m + R_p_m*R_p_m + epsilon)
@@ -901,15 +1009,15 @@ class cvvdp(vq_metric):
 
     def clamp_diffs(self,D):
         if self.dclamp_type == "hard":
-            Dc = torch.clamp(D, max=(10**self.d_max))
+            Dc = torch.clamp(D, max=self.d_max_pow)
         elif self.dclamp_type == "soft":
-            max_v = 10**self.d_max
+            max_v = self.d_max_pow
             Dc = max_v * D / (max_v + D)
         elif self.dclamp_type == "none":
             Dc = D
         elif self.dclamp_type == "per_channel":
             num_ch = D.shape[0]
-            max_v = 10**(self.d_max[:num_ch,...].view(-1,1,1,1))
+            max_v = self.d_max_pow[:num_ch,...].view(-1,1,1,1)
             Dc = max_v * D / (max_v + D)
         else:
             raise RuntimeError( f"Unknown difference clamping type {self.dclamp_type}" )
@@ -922,9 +1030,9 @@ class cvvdp(vq_metric):
         if self.pu_dilate != 0 and M.shape[-2]>self.pu_padsize and M.shape[-1]>self.pu_padsize:
             #M_pu = utils.imgaussfilt( M, self.pu_dilate ) * torch.pow(10.0, self.mask_c)
             H, W = M.shape[-2], M.shape[-1] # We need to reshape because the Gaussian does not work with 5D tensors
-            M_pu = self.pu_blur.forward(M.view(-1,1,H,W)).view( M.shape[0:-2] + (H,W) ) * (10**self.mask_c)
+            M_pu = self.pu_blur.forward(M.view(-1,1,H,W)).view( M.shape[0:-2] + (H,W) ) * self.mask_c_pow
         else:
-            M_pu = M * (10**self.mask_c)
+            M_pu = M * self.mask_c_pow
         return M_pu
 
     def phase_uncertainty_no_c(self, M):
@@ -960,7 +1068,7 @@ class cvvdp(vq_metric):
         return R
 
     def smooth_clamp_cont( self, C, p ):
-        max_v = 10**self.d_max
+        max_v = self.d_max_pow
         C_clamped = torch.div( (max_v*(C**p)+1), (max_v + C**p) )
         return C_clamped
 
@@ -1061,10 +1169,20 @@ class cvvdp(vq_metric):
         else:
             standard_str = f'custom-display: {self.display_name}'
 
-        L_black, L_refl = self.display_photometry.get_black_level()
-        return f'"{self.full_name()} v{self.version}, {self.pix_per_deg:.4g} [pix/deg], ' \
-               f'Lpeak={self.display_photometry.get_peak_luminance():.5g}, ' \
-               f'Lblack={L_black:.4g}, Lrefl={L_refl:.4g} [cd/m^2], ({standard_str})"'
+        if isinstance(self.display_photometry, tuple): # separate photometry for the test and reference
+            L_black_test, L_refl_test = self.display_photometry[0].get_black_level()
+            L_black_ref, L_refl_ref = self.display_photometry[1].get_black_level()
+            return f'"{self.full_name()} v{self.version}, {self.pix_per_deg:.4g} [pix/deg], ' \
+                f'Test: Lpeak={self.display_photometry[0].get_peak_luminance():.5g}, ' \
+                f'Lblack={L_black_test:.4g}, Lrefl={L_refl_test:.4g} [cd/m^2]; '  \
+                f'Reference: Lpeak={self.display_photometry[1].get_peak_luminance():.5g}, ' \
+                f'Lblack={L_black_ref:.4g}, Lrefl={L_refl_ref:.4g} [cd/m^2]"' 
+                
+        else:
+            L_black, L_refl = self.display_photometry.get_black_level()
+            return f'"{self.full_name()} v{self.version}, {self.pix_per_deg:.4g} [pix/deg], ' \
+                f'Lpeak={self.display_photometry.get_peak_luminance():.5g}, ' \
+                f'Lblack={L_black:.4g}, Lrefl={L_refl:.4g} [cd/m^2], ({standard_str})"' 
 
     def write_features_to_json(self, stats, dest_fname):
         Q_per_ch = stats['Q_per_ch'] # quality per channel [cc,ff,bb]
@@ -1245,3 +1363,11 @@ class cvvdp(vq_metric):
 
 
 register_metric( cvvdp )
+
+class cvvdp_0_5_6(cvvdp):
+    def __init__(self, config_paths=[], **kwargs):
+        path = os.path.join(os.path.dirname(__file__), "vvdp_data", 'cvvdp_parameters-0_5_6.json' )
+        config_paths.insert(0,path)
+        super().__init__(**kwargs, config_paths=config_paths)
+
+register_metric( cvvdp_0_5_6 )

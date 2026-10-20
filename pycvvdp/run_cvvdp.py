@@ -96,12 +96,13 @@ def parse_args(arg_list=None):
     parser.add_argument("-o", "--output-dir", type=str, default=None, help="in which directory heatmaps and feature files should be stored (the default is the current directory)")
     parser.add_argument("--result", type=str, default=None, help="write metric prediction results to a CSV file passed as an argument.")
     parser.add_argument("-c", "--config-paths", type=str, nargs='+', default=[], help="One or more paths to configuration files or directories. The main configurations files are `display_models.json`, `color_spaces.json` and `cvvdp_parameters.json`. The file name must start as the name of the original config file.")
-    parser.add_argument("-d", "--display", type=str, default="standard_4k", help="display name, e.g. 'HTC Vive', or ? to print the list of models.")
+    parser.add_argument("-d", "--display", type=str, nargs='+', default=["standard_4k"], help="one or two display names, e.g. 'HTC Vive', or ? to print the list of models. If two are given, the first is used for the test and the second for the reference.")
     parser.add_argument("-n", "--nframes", type=int, default=-1, help="the number of video frames you want to compare")
     parser.add_argument("--count-frames", action='store_true', default=False, help="Use accurate method to count frames in a video. Slower but accurate. Use if you see frame read errors.")
     parser.add_argument("-f", "--full-screen-resize", choices=['bilinear', 'bicubic', 'nearest', 'area'], default=None, help="Both test and reference videos will be resized to match the full resolution of the display. Currently works only with videos.")
     parser.add_argument("-m", "--metric", choices=available_metrics, nargs='+', default=['cvvdp'], help='Select which metric(s) to run')
-    parser.add_argument("--temp-padding", choices=['replicate', 'symmetric', 'valid'], default='replicate', help='How to pad the video in the time domain (for the temporal filters). "replicate" - repeat the first frame. "symmetric" - mirror the first frames. "valid" - skip initial frames until buffer is fully populated (no padding artifacts).')
+    parser.add_argument("--temp-padding", choices=['replicate', 'symmetric', 'valid'], default=None, help='How to pad the video in the time domain (for the temporal filters). "replicate" - repeat the first frame. "symmetric" - mirror the first frames. "valid" - skip initial frames until buffer is fully populated (no padding artifacts). The metric default is used when unspecified.')
+    parser.add_argument("--spatial-padding", choices=['symmetric', 'zero', 'valid'], default=None, help='How to pad the video beyond the image frame (for the spatial decomposition). "symmetric" - mirror-like reflection. "valid" - crop the pixels for which spatial filters cannot be applied; "zero" - set the pixels outside the frame to 0. The metric default is used when unspecified.')
     parser.add_argument("--pix-per-deg", type=float, default=None, help='Overwrite display geometry and use the provided pixels per degree value.')
     parser.add_argument("--fps", type=float, default=None, help='Frames per second. It will overwrite frame rate stores in the video file. Required when passing an array of image files.')
     parser.add_argument("--frames", type=str, default=None, help='Range of frames specified as first:step:last, first:last, or first: (Matlab notation). Currently works only with frames provided as images.')
@@ -117,6 +118,10 @@ def parse_args(arg_list=None):
         args = parser.parse_args(arg_list)
     else:
         args = parser.parse_args()
+
+    if len(args.display) not in (1, 2):
+        parser.error("--display/-d accepts either one or two values.")
+
     return args
 
 def run_on_args(args):
@@ -133,8 +138,8 @@ def run_on_args(args):
         import platform
         logging.debug( f'Platform: {platform.platform()}' )
 
-    if args.display == "?":
-        vvdp_display_photometry.list_displays(args.config_paths)
+    if args.display[0] == "?":
+        pycvvdp.vvdp_display_photometry.list_displays(args.config_paths)
         return
 
     if args.test is None or args.ref is None:
@@ -158,38 +163,9 @@ def run_on_args(args):
             frame_range = range(sn[0],(sn[1]+1))
 
 
-
-    # Changed option to include MPS support for Macbooks
-    # if args.gpu >= 0 and torch.cuda.is_available():
-    #     device = torch.device('cuda:' + str(args.gpu))
-    # else:
-    #     device = torch.device('cpu')
-
     device = utils.get_best_device(args.device)
-    # args.device = args.device.lower()
-    # if args.device == 'auto': # Auto-detect CUDA or MPS
-    #     if torch.cuda.is_available():
-    #         args.device = 'cuda'
-    #     elif torch.backends.mps.is_available():
-    #         args.device = 'mps'
-    #     else:
-    #         logging.warning(f'No CUDA or MPS found and ColorVideoVDP will run on CPU. This may result in slow execution.')
-    #         args.device = 'cpu'
-
-    # if args.device.startswith('cuda') and torch.cuda.is_available():
-    #     device = torch.device(args.device)
-    # elif args.device == 'mps':
-    #     torch_version = list(map(int, re.search(r'\d+\.\d+\.\d+', torch.__version__).group(0).split('.')))
-    #     assert torch_version[0] > 2 or (torch_version[0] == 2 and torch_version[1] > 0), f'Please use torch>=2.1.0 with MPS. Current version is {torch.__version__}.'
-    #     assert sys.platform == 'darwin', 'Device "mps" is only valid on a Mac.'
-    #     device = torch.device(args.device)
-    # else:
-    #     if args.device != 'cpu':
-    #         logging.warning(f'The requested device ({args.device}) is not found, reverting to CPU. This may result in slow execution.')
-    #     device = torch.device('cpu')
 
     logging.info("Running on device: " + str(device))
-
 
     heatmap_types = ["raw", "threshold", "supra-threshold"]
 
@@ -235,9 +211,13 @@ def run_on_args(args):
         sys.exit()
 
     metrics = []
-    display_photometry = vvdp_display_photometry.load(args.display, config_paths=args.config_paths)
+    if len(args.display) == 2: # Separate photometry for the test and reference displays
+        display_photometry = (pycvvdp.vvdp_display_photometry.load(args.display[0], config_paths=args.config_paths), pycvvdp.vvdp_display_photometry.load(args.display[1], config_paths=args.config_paths))
+    else:
+        display_photometry = pycvvdp.vvdp_display_photometry.load(args.display[0], config_paths=args.config_paths)
+
     if args.pix_per_deg is None:
-        display_geometry = vvdp_display_geometry.load(args.display, config_paths=args.config_paths)
+        display_geometry = pycvvdp.vvdp_display_geometry.load(args.display[0], config_paths=args.config_paths)
     else:
         display_geometry = vvdp_display_geometry( [1024, 1024], ppd=args.pix_per_deg )
 
@@ -271,7 +251,9 @@ def run_on_args(args):
         if 'heatmap' in constructor_args:
             met_args['heatmap'] = args.heatmap
         if 'temp_padding' in constructor_args:
-            met_args['temp_padding'] = args.temp_padding
+            met_args['temp_padding'] = args.temp_padding        
+        if 'spatial_padding' in constructor_args:
+            met_args['spatial_padding'] = args.spatial_padding        
         if 'config_paths' in constructor_args:
             met_args['config_paths'] = args.config_paths
         if 'gpu_mem' in constructor_args:
@@ -340,7 +322,17 @@ def run_on_args(args):
                 base_fname = os.path.join(out_dir, base)
                 mm.set_base_fname(base_fname)
 
-                Q_pred, stats = mm.predict_video_source(vs)
+                predict_args = inspect.getfullargspec(mm.__class__.predict_video_source)[0]
+                if 'heatmap_file' in predict_args and do_heatmap:
+                    height, width, N_frames = vs.get_video_size()
+                    is_image = N_frames==1
+                    heatmap_ext = 'png' if is_image else 'mp4'
+                    heatmap_file = os.path.join(out_dir, base + "_heatmap." + heatmap_ext)
+                    logging.info(f"Writing {args.heatmap} heatmap to '{heatmap_file}'...")
+
+                    Q_pred, stats = mm.predict_video_source(vs, heatmap_file=heatmap_file)
+                else:
+                    Q_pred, stats = mm.predict_video_source(vs)
                 Q_pred_scalar = Q_pred.item()
                 if args.quiet:
                     print( "{Q:0.4f}".format(Q=Q_pred_scalar) )
@@ -358,16 +350,6 @@ def run_on_args(args):
                     dest_name = os.path.join(out_dir, base + "_fmap.json")
                     logging.info("Writing feature map '" + dest_name + "' ...")
                     mm.write_features_to_json(stats, dest_name)
-
-                if do_heatmap and not stats is None:
-                    if stats["heatmap"].shape[2]>1: # if it is a video
-                        dest_name = os.path.join(out_dir, base + "_heatmap.mp4")
-                        logging.info("Writing heat map '" + dest_name + "' ...")
-                        np2vid(torch.squeeze(stats["heatmap"].permute((2,3,4,1,0)), dim=4).cpu().numpy(), dest_name, vs.get_frames_per_second(), args.verbose)
-                    else:
-                        dest_name = os.path.join(out_dir, base + "_heatmap.png")
-                        logging.info("Writing heat map '" + dest_name + "' ...")
-                        np2img(torch.squeeze(stats["heatmap"].permute((2,3,4,1,0)), dim=4).cpu().numpy(), dest_name)
 
                 if args.distogram != -1:
                     dest_name = os.path.join(out_dir, base + "_distogram.png")

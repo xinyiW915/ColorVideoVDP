@@ -27,7 +27,15 @@ If you use the metric in your research, please cite the paper above.
 
 # Other metrics: ColorVideoVDP-ML, PU-PSNR
 
-The repository also contains code for other metrics, such as PU-PSNR, or ColorVideoVDP-ML. See [metrics.md](/metrics.md) for more information.
+The repository also contains code for other metrics, which can be activated by passing `--metric` argument. Those metrics include: 
+
+* ColorVideoVDP-tm - as shown in [this project](https://kenchen10.github.io/projects/tmometric/index.html), ColorVideoVDP performs well as a tone-mapping evaluation metric, outperforming dedicated tone mapping metrics, such as TMQI, FSITM and FFTMI. The change that improved the performance on tone mapping has been incorporated into ColorVideoVDP v0.6.0 so there is no need to change to another metric. See also [HDR content](#hdr-content).
+
+* `pu-psnr-rgb2020` and `pu-psnr-y` - this metric transforms high dynamic range content into [PU21](https://github.com/gfxdisp/pu21), perceptually uniform space, and then computes PSNR, either on BT.2020 RGB color values, or luminance. It is a simple metric intended for HDR content. 
+
+* `cvvdp-ml-saliency`, `cvvdp-ml-transformer` - the combination of ColorVideoVDP backbone with a machine-learning component, as explained [here](https://www.cl.cam.ac.uk/research/rainbow/projects/cvvdp-ml/). Those metrics performed very well in the [ICME](https://sites.google.com/view/icme25-vqm-gc/home?authuser=0) and [QoMEX](https://sites.google.com/view/qomex26-vqm-gc/home) video metric challenges and can be a great choice for the specific applications. However, at the moment they may not generalise as well as the regular ColorVideoVDP.
+
+More details can be found in [metrics.md](/metrics.md).
 
 ## PyTorch quickstart
 1. Start by installing [anaconda](https://docs.anaconda.com/anaconda/install/index.html) or [miniconda](https://docs.conda.io/en/latest/miniconda.html). Then, create a new environment for ColorVideoVDP and activate it:
@@ -134,11 +142,13 @@ Check [examples](examples/) folder showing how to call ColorVideoVDP from Python
     - [Visualization](#visualization)
     - [Configuration files](#configuration-files)
     - [Display model preview](#display-model-preview)
+    - [Spatial and temporal padding](#spatial-and-temporal-padding)
     - [Interactive mode](#Interactive-mode)
     - [Python interface](#python-interface)
     - [Loss function](#loss-function)
     - [Matlab interface](#matlab-interface)
 - [How to report issues?](#how-to-report-issues)
+- [Pull requests](#pull-requests)
 - [Release notes](#release-notes)
 
 ## Display specification
@@ -166,6 +176,13 @@ If you run the metric from Python code, the display photometry and geometry can 
 * HDR video files encoded using PQ (SMPTE ST 2084) or HLG EOTF functions. Pass the video files as `--test` and `--ref` arguments and specify `--display standard_hdr_pq` or `--display standard_hdr_hlg`.
 
 * OpenEXR images. The images *MUST* contain absolute linear color values (color graded values, emitted from the display). That is, if the disply peak luminance is 1000, RGB=(1000,1000,1000) corresponds to the maximum value emitted from the display. If you pass images with the maximum value of 1, the metric will assume that the images are very dark (the peak of 1 nit) and result in incorerect predictrions. You need to specify `--display standard_hdr_linear` to use correct EOTF. 
+
+* You can also use ColorVideoVDP to evaluate tone mapping. You need to pass two displays models:
+```bash
+cvvdp --test example_media/nancy_church_reinhard02.png --ref example_media/nancy_church.hdr -d standard_4k standard_hdr_linear
+```
+Note that `nancy_church.hdr` image must be scaled in the absolute units (e.g., cd/m^2).
+
 
 **Troubleshooting on Linux:** You may need to update your library path by adding the following line to your `~/.bashrc`:
 ```bash
@@ -283,6 +300,23 @@ You can also alternative versions of this debug "metric":
 * `--metric dm-preview-sbs` - instead of creating two separate files, one for reference and one for test, put those in the same frame side-by-side. 
 * `--metric dm-preview-exr-sbs` - the two above combined
 
+## Spatial and temporal padding
+
+ColorVideoVDP sometimes need to access pixels outside the frame, or frames before the first frame. This is required for the causal temporal filters that operate on a 250 ms window, and the Laplacian filters used for spatial decomposition. The padding options specify how those missing pixels should be generated. 
+
+You set **temporal padding** by passing `--temp-padding` argument to the `cvvdp` command line, or setting `temp_padding` argument of the `cvvdp` class constructor. The available options are:
+* `replicate` - repeat the first frame.
+* `symmetric` - a mirror-like reflection; if the first frame has index 0, frame -1 has index 1 and so on. If the video sequence is shorter than what is required by the temporal filter, the video sequence will be repeated in a ping-pong manner. This padding better preserves the dynamic of the video and is used by default from version 0.6.0.
+
+You set **spatial padding** by passing `--spatial-padding` argument to the `cvvdp` command line, or setting `spatial_padding` argument of the `cvvdp` class constructor. The available options are:
+* `zero` - pixels outside the frame are assumed to have zero values.
+* `symmetric` - a mirror-like reflection (default).
+* `valid` - the subbands are shrunk to contain only the pixels for which the spatial filter can be computed. 
+
+The `symmetric` padding is best at preserving image and motion statistics, but it comes with a consequence: the distortion that is near the frame edge (or the beginning of the video) will be duplicated and, therefore, count twice when computing quality. 
+
+The metric has been calibrated for the default values of the padding parameters. Changing padding will change the predictions and may result in a slightlt less accurate metric performance. 
+
 ## Interactive mode
 
 `cvvdp` will need to initialize PyTorch every time it starts, which will lead to a significant slow down when evaluating many files. To avoid this slowdown, you can start `cvvdp` in interactive mode by passing `--interactive` argument. When started that way, each line on the standard input should contain a complete list of arguments, as you would pass them to `cvvdp` program (but without the `cvvdp`). For example: 
@@ -335,7 +369,24 @@ Please use "Issues" tab in GitHub.
 
 When reporting a problem, run `cvvdp` with `--verbose` argument and paste the entire output of the terminal, including the command line used to run `cvvdp`. If possible, include images/video on which the problem can be reproduced. 
 
+# Pull requests
+
+If you found a way to improve ColorVideoVDP, submit your pull request. To ensure that your pull request is swiftly accepted:
+
+* Make the pull request using as the base the latest development branch (`dev_<verision>`) rather than the `main` branch.
+
+* Run `tests/test_all.py` before and after introducing your changes and compare the results. 
+
 # Release notes
+
+* v0.6.0 (?)
+  - ColorVideoVDP v0.6.0 introduced a small change that has greatly improved metric performance when evaluating the results of tone mapping and also improved stability when ColorVideoVDP is used for optimization. Prior to v0.6.0, ColorVideoVDP used the reference image to find the background luminance for contrast sensitivity. From v0.6.0 onwards, the sensitivity is computed separately for the test and reference images. 
+  - ColorVideoVDP 0.6.0 has been retrained on 4 datasets: [XR-DAVID](https://doi.org/10.17863/CAM.108210), [UPIQ](https://doi.org/10.17863/CAM.68372), [KADID10k](https://database.mmsp-kn.de/kadid-10k-database.html) and the dataset from QoMEX 2026 Challenge [Video Quality Assessment for Asymmetric Encoded Videos](https://sites.google.com/view/qomex26-vqm-gc/home).
+  - `heatmap_file` passed to the `cvvdp.predict` allows to save heatmaps to video files (of infinite length) rather than store them in memory
+  - Display photometry can now be specified separately for the test and reference content. This is useful when evaluating tone mapping, e.g., comparing a tone-mapped sRGB image to HDR reference
+  - The original ColorVideoVDP can be still run by passing `--metric cvvdp-0-5-6`
+  - New examples: `ex_luminance_masking.py`, `ex_contrast_masking.py`, `ex_custom_video_source.py`, `ex_noise_concealment.py`
+  - The inference and backpropagation is be up to 40% faster thanks to various code optimisations (thanks to Ethan Chen)
 
 * v0.5.7 (2/August/2026)
   - Bug fix: `--temp-padding=symmetric` now works with very short video files

@@ -1,3 +1,12 @@
+# v0.6.0 (?)
+* Added: The contrast sensitivity is computed separately for test and reference images. This much improves the predictions of display quality and for tone mapping. See Sec. 3.3 in [this paper](http://dx.doi.org/10.1145/3799902.3811107).
+* Added: Display photometry can now be specified separately for the test and reference content. This is useful when evaluating tone mapping, e.g., comparing a tone-mapped sRGB image to HDR reference.
+* Added: `heatmap_file` passed to the `cvvdp.predict` allows to save heatmaps to video files (of infinite length) rather than store them in memory
+* Added: new examples - `ex_luminance_masking.py`, `ex_contrast_masking.py`, `ex_custom_video_source.py`, `ex_noise_concealment.py`
+* Fixed: Code optimizations that reduce the inference and backpropagation times (up to 43% on a CUDA device) - thanks to Ethan Chen
+* Fix: the number of pyramid levels is set to stop at 0.2 cpd (excluding the base band)
+* Added: added multplipe spatial padding options
+
 # v0.5.7 (2/08/2026)
 * Bug fix: `--temp-padding=symmetric` now works with very short videos (when the number of frames in the stream is smaller than the temporal filter length)
 * Change: `--temp-padding` is set to `replicate` by default for compatibility with the previous versions
@@ -6,8 +15,8 @@
 * Bug fix: incorrect assert in dm_preview_metric.py
 * Fix: disabled some unnecessary warning messages when dm-preview was selected
 * Fix: YCbCr to RGB transform changed from BT.601 to BT.709 (issue #36)
-* Bug fix: --dump-channels works again (was broken after adding the batch mode)
-* Fix: --device=mps works again (on Apple Silicon)
+* Bug fix: `--dump-channels` works again (was broken after adding the batch mode)
+* Fix: `--device=mps` works again (on Apple Silicon)
 * Added: Progress bar
 * Added: `--debug` will display the full stack trace when error is encountered. Otherwise, the stack trace should be hidden.
 * Added: `--count-frames` will use slow but accurate method to ensure that we know the exact number of frames in the stream.
