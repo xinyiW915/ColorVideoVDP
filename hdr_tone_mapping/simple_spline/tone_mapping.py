@@ -1,12 +1,14 @@
 """Luminance-only HDR splines and SDR ACES Filmic."""
+
 import numpy as np
 from scipy.interpolate import CubicHermiteSpline
 
 
 def pq_decode(value):
     p = np.clip(value, 0, 1) ** (1 / 78.84375)
-    return 10000 * (np.maximum(p - 0.8359375, 0) /
-                    (18.8515625 - 18.6875 * p)) ** (1 / 0.1593017578125)
+    return 10000 * (np.maximum(p - 0.8359375, 0) / (18.8515625 - 18.6875 * p)) ** (
+        1 / 0.1593017578125
+    )
 
 
 def pq_encode(nits):
@@ -22,13 +24,16 @@ def hdr_spline(nits, peak, source_peak=10000, knee_ratio=0.5):
     not a fit or inverse calibration of the measured ASUS display.
     """
     if not (0 < knee_ratio <= 0.5 and 0 < peak < source_peak <= 10000):
-        raise ValueError("Require 0 < knee_ratio <= .5 and 0 < peak < source_peak <= 10000")
+        raise ValueError(
+            "Require 0 < knee_ratio <= .5 and 0 < peak < source_peak <= 10000"
+        )
     knee = peak * knee_ratio
     a, b, c = np.log([knee, peak, source_peak])
     delta = b - a
     middle_slope = min(0.2, 1.2 * delta / (c - b))
-    spline = CubicHermiteSpline([a, b, c], [a, a + 0.6 * delta, b],
-                               [1, middle_slope, 0], extrapolate=False)
+    spline = CubicHermiteSpline(
+        [a, b, c], [a, a + 0.6 * delta, b], [1, middle_slope, 0], extrapolate=False
+    )
     values = np.clip(np.asarray(nits, dtype=np.float64), 0, source_peak)
     shoulder = np.exp(spline(np.log(np.clip(values, knee, source_peak))))
     return np.where(values <= knee, values, shoulder)
@@ -60,16 +65,21 @@ def sdr_aces_fit(rgb_nits, exposure_nits=100):
     if exposure_nits <= 0:
         raise ValueError("exposure_nits must be positive")
     x = np.maximum(rgb_nits, 0) / exposure_nits
-    return np.clip((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0, 1)
+    return np.clip((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0, 1)
 
 
 def srgb_encode(linear):
     x = np.clip(linear, 0, 1)
-    return np.where(x <= .0031308, 12.92 * x, 1.055 * x ** (1 / 2.4) - .055)
+    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * x ** (1 / 2.4) - 0.055)
 
 
 # D65 linear BT.2020 -> linear BT.709. Negative/out-of-gamut values are clipped
 # before SDR ACES Filmic; this is simple gamut clipping, not gamut compression.
-RGB2020_TO_709 = np.array([[1.660491, -.587641, -.072850],
-                         [-.124550, 1.132900, -.008349],
-                         [-.018151, -.100579, 1.118730]], dtype=np.float32)
+RGB2020_TO_709 = np.array(
+    [
+        [1.660491, -0.587641, -0.072850],
+        [-0.124550, 1.132900, -0.008349],
+        [-0.018151, -0.100579, 1.118730],
+    ],
+    dtype=np.float32,
+)

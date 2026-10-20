@@ -1,24 +1,30 @@
 ﻿"""Simulate measured white response with a spline and ACES Filmic."""
 import argparse
-from contextlib import ExitStack
-from fractions import Fraction
 import json
-from pathlib import Path
 import sys
 import time
-
-
+from contextlib import ExitStack
+from fractions import Fraction
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
-from hdr_tone_mapping.video_io import HDRReader, HDRExperimentWriter, validate_mp4
-from hdr_tone_mapping.sdr_mapping import encode_numpy
-
-from hdr_tone_mapping.simple_spline.tone_mapping import pq_decode, pq_encode, srgb_encode, BT2020_LUMA, RGB2020_TO_709
-from hdr_tone_mapping.calibrated_simulation.white_response import WhiteResponse, scale_luminance
 import ffmpeg
 import numpy as np
+
+from hdr_tone_mapping.calibrated_simulation.white_response import (
+    WhiteResponse,
+    scale_luminance,
+)
+from hdr_tone_mapping.sdr_mapping import encode_numpy
+from hdr_tone_mapping.simple_spline.tone_mapping import (
+    BT2020_LUMA,
+    RGB2020_TO_709,
+    pq_decode,
+    pq_encode,
+)
+from hdr_tone_mapping.video_io import HDRExperimentWriter, HDRReader, validate_mp4
 
 
 def plot(model, folder):
@@ -135,16 +141,16 @@ def convert(args, model, folder):
         decode_checks[mode] = validate_mp4(partial)
     for mode, partial in partials.items():
         partial.replace(targets[mode])
-    report = dict(parameters=vars(args), calibration=model.summary(), frames=count, outputs=checks,
-                  sdr_mapping="Shared Y-only ACES Filmic; exposure_nits; SDR white=100 nits",
-                  mapping_device=device, elapsed_seconds=time.perf_counter()-started,
-                  playback_validation=decode_checks,
-                  writer_settings='legacy CPU x265/x264, CRF 12, bf=0, hdr-opt=1 (HDR), MP4 faststart',
-                  sdr_white_nits=100, sdr_gamut_clipped_pixels=gamut_clipped,
-                  mapping="Scaled measured response with shadow-only correction; Y-only",
-                  drive_assumption="Scaled measured pixel/Y response; nominal input luminance assumption",
-                  playback="PQ output contains simulated absolute nits; SDR requires managed white at sdr_white_nits",
-                  timing="Nominal CFR; no audio; original timestamps not preserved")
+    report = {"parameters": vars(args), "calibration": model.summary(), "frames": count, "outputs": checks,
+                  "sdr_mapping": "Shared Y-only ACES Filmic; exposure_nits; SDR white=100 nits",
+                  "mapping_device": device, "elapsed_seconds": time.perf_counter()-started,
+                  "playback_validation": decode_checks,
+                  "writer_settings": 'legacy CPU x265/x264, CRF 12, bf=0, hdr-opt=1 (HDR), MP4 faststart',
+                  "sdr_white_nits": 100, "sdr_gamut_clipped_pixels": gamut_clipped,
+                  "mapping": "Scaled measured response with shadow-only correction; Y-only",
+                  "drive_assumption": "Scaled measured pixel/Y response; nominal input luminance assumption",
+                  "playback": "PQ output contains simulated absolute nits; SDR requires managed white at sdr_white_nits",
+                  "timing": "Nominal CFR; no audio; original timestamps not preserved"}
     (folder / f"{source.stem}_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Completed {count} frames for each of three variants", flush=True)
 
