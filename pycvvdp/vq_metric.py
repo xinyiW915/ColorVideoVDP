@@ -52,6 +52,7 @@ class vq_metric:
 
     def set_display_model(self, display_name="standard_4k", display_photometry=None, display_geometry=None, config_paths=[]):
         if display_photometry is None:
+            from pycvvdp.display_model import vvdp_display_photometry
             self.display_photometry = vvdp_display_photometry.load(display_name, config_paths)
             self.display_name = display_name
         else:

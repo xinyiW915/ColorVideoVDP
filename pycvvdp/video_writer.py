@@ -56,7 +56,8 @@ class VideoWriter:
             else:
                 self.process = (ffmpeg
                         .input('pipe:', format='rawvideo', pix_fmt='rgb24', s='{}x{}'.format(W, H), r=self.fps)
-                        .output(self.fname, pix_fmt='yuv420p', **{ "c:v": "mpeg4", "qscale:v": "3" } ) #format='mp4', crf=10
+                        # .output(self.fname, pix_fmt='yuv420p', **{ "c:v": "mpeg4", "qscale:v": "3" } ) #format='mp4', crf=10
+                        .output(self.fname, pix_fmt='yuv420p', crf=10, **{ "c:v": "libx264" } ) #format='mp4', crf=10
                         .overwrite_output()
                         .global_args( '-hide_banner')
                         .global_args( '-loglevel', 'info' if self.verbose else 'quiet')
@@ -110,6 +111,8 @@ class ImageWriter:
     BT.2020 + PQ for HDR
     """
     def write_frame_rgb(self, rgb):
+        if rgb.dtype != np.uint8:
+            rgb = (rgb * 255.0).astype(np.uint8)
         iio.imwrite(self.fname, rgb)
 
     # Delete or close if program was interrupted
