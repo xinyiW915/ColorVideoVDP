@@ -100,14 +100,14 @@ def convert(args, source, model, folder, device):
     ) != ("smpte2084", "bt2020", "bt2020nc", "tv"):
         raise ValueError("Expected limited-range BT.2020/PQ input")
     mappers = build_mappers(model, device, args.exposure_nits)
-    targets = {m: folder / f"{source.stem}_{m}.mp4" for m in mappers}
+    targets = {m: folder / f"{source.stem}_{m}.mkv" for m in mappers}
     if not args.overwrite and any(p.exists() for p in targets.values()):
         raise FileExistsError("Outputs exist; use --overwrite")
-    partials = {m: p.with_name(p.stem + ".partial.mp4") for m, p in targets.items()}
+    partials = {m: p.with_name(p.stem + ".partial.mkv") for m, p in targets.items()}
     import torch
 
     print(f"Input: {source}", flush=True)
-    print(f"Mapping device: {device}; encoding: CPU ({args.preset})", flush=True)
+    print(f"Mapping device: {device}; encoding: CPU (lossless FFV1)", flush=True)
     fps = stream["r_frame_rate"]
     count = 0
     with ExitStack() as stack:
@@ -121,7 +121,7 @@ def convert(args, source, model, folder, device):
         last_progress = time.perf_counter()
         writers = {
             m: stack.enter_context(
-                HDRExperimentWriter(p, fps, not m.startswith("sdr"), args.preset)
+                HDRExperimentWriter(p, fps, not m.startswith("sdr"))
             )
             for m, p in partials.items()
         }
@@ -150,7 +150,6 @@ def convert(args, source, model, folder, device):
         print("Finishing encoders and validating outputs...", flush=True)
     if count == 0:
         raise RuntimeError("No frames decoded")
-    checks, decode_checks = {}, {}
     for mode, partial in partials.items():
         # Count packets without decoding; validate_decode decodes every frame afterwards.
         output = next(
@@ -167,33 +166,10 @@ def convert(args, source, model, folder, device):
             or (output["width"], output["height"]) != (reader.width, reader.height)
         ):
             raise RuntimeError(f"Validation failed: {partial}")
-        checks[mode] = output
         print(f"Full decode validation: {mode}", flush=True)
-        decode_checks[mode] = validate_decode(partial)
+        validate_decode(partial)
     for mode, partial in partials.items():
         partial.replace(targets[mode])
-    report = {
-        "input": str(source),
-        "parameters": vars(args),
-        "calibration": model.summary(),
-        "frames": count,
-        "outputs": checks,
-        "mappings": {m: mapper.summary() for m, mapper in mappers.items()},
-        "mapping_device": device,
-        "elapsed_seconds": time.perf_counter() - started,
-        "playback_validation": decode_checks,
-        "reader": "pycvvdp video_reader; ffmpeg command with explicit limited-range BT.2020 YUV->RGB",
-        "writer_settings": (
-            "pycvvdp VideoWriter; ffmpeg command with explicit RGB->YUV matrix and tags "
-            f"(BT.2020/PQ HDR, BT.709/sRGB SDR); x265/x264 CRF 12, preset {args.preset}, bf=0, "
-            "hdr-opt=1 (HDR), MP4 faststart"
-        ),
-        "playback": "PQ output contains simulated absolute nits; SDR requires managed white at 100 nits",
-        "timing": "Nominal CFR; no audio; original timestamps not preserved",
-    }
-    (folder / f"{source.stem}_report.json").write_text(
-        json.dumps(report, indent=2), encoding="utf-8"
-    )
     elapsed = time.perf_counter() - started
     print(
         f"Completed {count} frames for each of three variants in {elapsed:.0f}s "
@@ -218,9 +194,9 @@ def main():
     parser.add_argument(
         "--max-frames",
         type=int,
-        help="Maximum frames to process; omit to process the entire video",
+        default=600,
+        help="Maximum frames to process (default 600: the 10 s clip at 60 fps)",
     )
-    parser.add_argument("--preset", default="fast", help="x265/x264 preset")
     parser.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda"],

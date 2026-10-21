@@ -10,10 +10,6 @@ import torch
 from hdr_tone_mapping.color_encoding import RGB2020_TO_709, srgb_encode
 
 SDR_WHITE_NITS = 100
-# A pixel counts as out of the BT.709 gamut only if a component is below
-# -1% of the exposure (-1 nit at the default 100). Smaller negatives come
-# mostly from noise in near-black pixels; they are still clamped to 0.
-OUT_OF_GAMUT_THRESHOLD = 0.01
 
 
 def aces_filmic(x):
@@ -27,7 +23,7 @@ def aces_filmic(x):
 
 
 class SDRAces:
-    """Linear BT.2020 RGB nits -> sRGB-encoded BT.709; counts out-of-gamut pixels."""
+    """Linear BT.2020 RGB nits -> sRGB-encoded BT.709."""
 
     def __init__(self, device="cpu", exposure_nits=100):
         if exposure_nits <= 0:
@@ -35,8 +31,6 @@ class SDRAces:
         self.device = torch.device(device)
         self.exposure = exposure_nits
         self.to_709 = torch.tensor(RGB2020_TO_709, device=self.device)
-        self.out_of_gamut_pixels = 0
-        self.total_pixels = 0
 
     def curve(self, nits):
         """Output nits for input nits on one channel (or a neutral grey); NumPy array or tensor."""
@@ -45,23 +39,4 @@ class SDRAces:
     def __call__(self, rgb):
         # Exposure, then BT.2020 -> BT.709; both linear, so the order does not matter.
         relative = (rgb @ self.to_709.T) / self.exposure
-        outside = (relative < -OUT_OF_GAMUT_THRESHOLD).any(dim=-1)
-        self.out_of_gamut_pixels += int(outside.sum().item())
-        self.total_pixels += outside.numel()
         return srgb_encode(aces_filmic(relative))
-
-    def summary(self):
-        return {
-            "mapping": "Narkowicz ACES Filmic applied per linear BT.709 RGB channel",
-            "exposure_nits": self.exposure,
-            "exposure_status": "Initial assumption; independent of CSV",
-            "sdr_white_nits": SDR_WHITE_NITS,
-            "out_of_gamut_pixels": self.out_of_gamut_pixels,
-            "out_of_gamut_percent": 100
-            * self.out_of_gamut_pixels
-            / max(self.total_pixels, 1),
-            "out_of_gamut_threshold_nits": OUT_OF_GAMUT_THRESHOLD * self.exposure,
-            "out_of_gamut_definition": "Any BT.709 component below -threshold; smaller negatives are mostly near-black noise",
-            "out_of_gamut_handling": "All negative BT.709 components clamped to 0 before the curve",
-            "output": "BT.709 / sRGB",
-        }

@@ -161,11 +161,3 @@ class HDRSpline:
         )
         # Every channel stays <= peak; saturated highlights move towards white.
         return pq_encode(torch.where(x <= knee, x, rolloff))
-
-    def summary(self):
-        return {
-            "mapping": "Identity to measured knee, measured roll-off to target peak; per RGB channel",
-            "peak_nits": self.peak,
-            "knee_nits": self.knee,
-            "output": "BT.2020 / PQ",
-        }

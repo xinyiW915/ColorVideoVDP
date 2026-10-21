@@ -1,10 +1,14 @@
-﻿"""Video I/O: ColorVideoVDP's video_reader and VideoWriter with only their ffmpeg commands replaced.
+﻿"""Video I/O: ColorVideoVDP's video_reader and VideoWriter with their ffmpeg commands replaced.
 
-Frames are still read by video_reader.get_frame()/unpack() and written by
-VideoWriter.write_frame_rgb(). The commands differ in one respect that matters:
-VideoWriter never sets the RGB->YUV matrix, so ffmpeg falls back to BT.601 while
-the HDR stream is tagged BT.2020 (and SDR is left untagged). Here the matrix,
-range and colour tags are explicit on both sides.
+Frames are still read by video_reader.get_frame()/unpack(). The commands differ in
+one respect that matters: VideoWriter never sets the RGB->YUV matrix, so ffmpeg
+falls back to BT.601 while the HDR stream is tagged BT.2020 (and SDR is left
+untagged). Here the matrix, range and colour tags are explicit on both sides.
+
+The writer also replaces VideoWriter.write_frame_rgb(): VideoWriter truncates
+frames to integers, so 8-bit SDR comes out about half a code value too dark;
+this writer rounds. Outputs are lossless FFV1 (10-bit HDR, 8-bit SDR) so that
+tone mapping adds no compression before the compression experiment.
 """
 
 import subprocess
@@ -44,18 +48,21 @@ class HDRReader(video_reader):
 
 
 class HDRExperimentWriter(VideoWriter):
-    """VideoWriter with its ffmpeg command replaced: explicit RGB -> YUV matrix
-    (BT.2020 HDR / BT.709 SDR) and colour tags, CRF 12, bf=0, MP4 faststart."""
+    """VideoWriter with its ffmpeg command and frame packing replaced: rounded RGB in
+    (16-bit HDR / 8-bit SDR), explicit RGB -> YUV matrix (BT.2020 HDR / BT.709 SDR)
+    and colour tags, lossless FFV1 4:2:0 out (10-bit HDR / 8-bit SDR; write to .mkv)."""
 
-    def __init__(self, fname, fps, hdr_mode, preset="fast"):
+    def __init__(self, fname, fps, hdr_mode):
         super().__init__(str(fname), fps=fps, hdr_mode=hdr_mode)
-        self.preset = preset
 
     def write_frame_rgb(self, rgb):
-        # VideoWriter only starts its own ffmpeg when self.process is None.
         if self.process is None:
             self.process = self._start_ffmpeg(*rgb.shape[:2])
-        super().write_frame_rgb(rgb)
+        if self.hdr_mode:
+            frame = np.round(rgb * 65535).astype(np.uint16)
+        else:
+            frame = np.round(rgb * 255).astype(np.uint8)
+        self.process.stdin.write(frame.tobytes())
 
     def _start_ffmpeg(self, height, width):
         matrix = "bt2020" if self.hdr_mode else "bt709"
@@ -63,27 +70,15 @@ class HDRExperimentWriter(VideoWriter):
         transfer = "smpte2084" if self.hdr_mode else "iec61966-2-1"
         colorspace = "bt2020nc" if self.hdr_mode else "bt709"
         options = {
-            "vcodec": "libx265" if self.hdr_mode else "libx264",
+            "vcodec": "ffv1",
+            "level": 3,
+            "slices": 24,
             "pix_fmt": "yuv420p10le" if self.hdr_mode else "yuv420p",
-            "crf": 12,
-            "bf": 0,
-            "preset": self.preset,
-            "movflags": "+faststart",
             "color_range": "tv",
             "color_primaries": primaries,
             "color_trc": transfer,
             "colorspace": colorspace,
         }
-        if self.hdr_mode:
-            options["tag:v"] = "hvc1"
-            options["x265-params"] = (
-                "hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:"
-                "colormatrix=bt2020nc:log-level=error"
-            )
-        else:
-            options["x264-params"] = (
-                "colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709"
-            )
         return (
             ffmpeg.input(
                 "pipe:",
