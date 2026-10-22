@@ -9,12 +9,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from hdr_tone_mapping.color_encoding import pq_encode
 from scipy.interpolate import PchipInterpolator
 
-from hdr_tone_mapping.color_encoding import pq_encode
-
 TARGET_PEAKS = (400, 1000)
-WHITE_CSV = Path(__file__).resolve().parent / "asushdr_display" / "resp_asushdr_pq1000_white.csv"
+WHITE_CSV = (
+    Path(__file__).resolve().parent
+    / "asushdr_display"
+    / "resp_asushdr_pq1000_white.csv"
+)
 
 
 def monotone_regression(values):
@@ -156,8 +159,8 @@ class HDRSpline:
         drive = (x * (model.knee_pixel / knee)).clamp(
             model.knee_pixel, float(model.pixel[-1])
         )
-        rolloff = (self.response(drive.log()).exp() * (knee / model.knee_response)).clamp(
-            max=self.peak
-        )
+        rolloff = (
+            self.response(drive.log()).exp() * (knee / model.knee_response)
+        ).clamp(max=self.peak)
         # Every channel stays <= peak; saturated highlights move towards white.
         return pq_encode(torch.where(x <= knee, x, rolloff))

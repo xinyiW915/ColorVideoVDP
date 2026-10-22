@@ -6,7 +6,6 @@ component, and gamma (sRGB) encoding follows. Output 1.0 is the 100-nit SDR whit
 """
 
 import torch
-
 from hdr_tone_mapping.color_encoding import RGB2020_TO_709, srgb_encode
 
 SDR_WHITE_NITS = 100

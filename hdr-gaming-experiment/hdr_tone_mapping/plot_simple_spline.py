@@ -11,9 +11,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import numpy as np
-from scipy.interpolate import CubicHermiteSpline
-
 from hdr_tone_mapping.hdr_spline import TARGET_PEAKS, WHITE_CSV, WhiteResponse
+from scipy.interpolate import CubicHermiteSpline
 
 # Same colours as the run.py curve plots.
 COLORS = {400: "tab:blue", 1000: "tab:orange"}
@@ -27,7 +26,9 @@ def simple_spline(nits, peak, source_peak=10000, knee_ratio=0.5):
     not derived from the measured display.
     """
     if not (0 < knee_ratio <= 0.5 and 0 < peak < source_peak <= 10000):
-        raise ValueError("Require 0 < knee_ratio <= .5 and 0 < peak < source_peak <= 10000")
+        raise ValueError(
+            "Require 0 < knee_ratio <= .5 and 0 < peak < source_peak <= 10000"
+        )
     knee = peak * knee_ratio
     a, b, c = np.log([knee, peak, source_peak])
     delta = b - a
@@ -58,12 +59,24 @@ def main():
     ax.loglog(x, x, ":", color="gray", label="1:1")
     for peak in TARGET_PEAKS:
         color = COLORS[peak]
-        ax.loglog(x, simple_spline(x, peak, knee_ratio=args.knee_ratio), "--", color=color,
-                  label=f"Simple spline {peak} nit (knee {args.knee_ratio * peak:.0f})")
-        ax.loglog(x, model.spline(x, peak), color=color,
-                  label=f"Calibrated spline {peak} nit (knee {model.knee * peak:.0f})")
-    ax.set(xlabel="Input luminance (nits)", ylabel="Output luminance (nits)",
-           title="Simple vs calibrated HDR spline")
+        ax.loglog(
+            x,
+            simple_spline(x, peak, knee_ratio=args.knee_ratio),
+            "--",
+            color=color,
+            label=f"Simple spline {peak} nit (knee {args.knee_ratio * peak:.0f})",
+        )
+        ax.loglog(
+            x,
+            model.spline(x, peak),
+            color=color,
+            label=f"Calibrated spline {peak} nit (knee {model.knee * peak:.0f})",
+        )
+    ax.set(
+        xlabel="Input luminance (nits)",
+        ylabel="Output luminance (nits)",
+        title="Simple vs calibrated HDR spline",
+    )
     ax.grid(which="both", alpha=0.2)
     ax.legend()
     folder = Path(args.output)

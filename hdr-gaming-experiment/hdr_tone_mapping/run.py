@@ -13,7 +13,6 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import ffmpeg
 import numpy as np
-
 from hdr_tone_mapping.color_encoding import pq_decode
 from hdr_tone_mapping.hdr_spline import (
     TARGET_PEAKS,
@@ -120,9 +119,7 @@ def convert(args, source, model, folder, device):
             total = min(total, args.max_frames) if total else args.max_frames
         last_progress = time.perf_counter()
         writers = {
-            m: stack.enter_context(
-                HDRExperimentWriter(p, fps, not m.startswith("sdr"))
-            )
+            m: stack.enter_context(HDRExperimentWriter(p, fps, not m.startswith("sdr")))
             for m, p in partials.items()
         }
         while args.max_frames is None or count < args.max_frames:
