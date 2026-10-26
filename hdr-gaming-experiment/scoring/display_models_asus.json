@@ -1,0 +1,24 @@
+{
+  "asus_pa32ucx_pq1000": {
+    "name": "32-inch 4K ASUS PA32UCX, PQ1000 mode (HDR, BT.2020/PQ), dark room, 60 pixels per degree",
+    "colorspace": "BT.2020-PQ",
+    "resolution": [3840, 2160],
+    "pixels_per_degree": 60,
+    "diagonal_size_inches": 32,
+    "max_luminance": 1000,
+    "min_luminance": 0.001,
+    "E_ambient": 5,
+    "source": "Size and model from HDRgamingExperiment/profiles/display_profile_xyz-linear_pa32ucs.mat; 60 ppd from the experiment code (about 0.63 m); peak is the PQ1000 specification; black level and ambient are estimates"
+  },
+  "asus_pa32ucx_sdr100": {
+    "name": "32-inch 4K ASUS PA32UCX showing SDR (BT.709/sRGB) with a 100-nit white, dark room, 60 pixels per degree",
+    "colorspace": "sRGB",
+    "resolution": [3840, 2160],
+    "pixels_per_degree": 60,
+    "diagonal_size_inches": 32,
+    "max_luminance": 100,
+    "min_luminance": 0.001,
+    "E_ambient": 5,
+    "source": "Same display and room as asus_pa32ucx_pq1000; the 100-nit SDR white is the tone-mapping assumption, not yet measured in Psychtoolbox"
+  }
+}
