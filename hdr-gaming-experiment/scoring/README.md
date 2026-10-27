@@ -19,6 +19,28 @@ python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --plot-only
 
 参数是片段名。`--targets`、`--heights`、`--bitrates` 可以只算一部分条件。每算完一个就写进 CSV；中断后再运行，会跳过已经用同样帧数算过的条件，`--overwrite` 强制重算。
 
+## 检查显示器模型（dm-preview）
+
+打分前先确认 ColorVideoVDP 读到的视频经过显示器模型后亮度是对的：
+
+```powershell
+python -B hdr-gaming-experiment/scoring/preview.py returnal_clip_005
+```
+
+每个目标抽一个测试视频（默认先 TM、2160p、25 Mbps，`--route`、`--height`、`--mbps` 可改），和 `score.py` 用同样的方式读入，用 ColorVideoVDP 的 `dm-preview` 把前 3 帧（`--frames`）存成 OpenEXR：绝对线性 BT.709 RGB，单位 cd/m²，上半是测试视频，下半是参考视频。文件在 `scoring/dm_preview/<片段>/`，已在 `.gitignore` 里，不进 git。
+
+终端会打印测试和参考视频的亮度（最小、中位数、99.9%、最大），以及显示器模型能输出的范围：
+
+| | 含义 | HDR1000 | HDR400 | SDR |
+|---|---|---|---|---|
+| floor | 黑位 + 环境光反射（PQ 先在 0.005 nits 截断） | ≈ 0.014 | ≈ 0.014 | ≈ 0.009 |
+| ceiling | 目标峰值 + 同样的偏移 | ≈ 1000 | ≈ 400 | ≈ 100 |
+
+以下情况会打印 `WARNING`：最小值低于 floor、超过 0.1% 的像素比 ceiling 高出 10% 以上（传输函数或范围错了会让整幅画面按比例偏亮）、分辨率和显示器不一致、测试和参考视频中位数差超过 10%。像素只是略高于 ceiling 时只打印 `note`，这是编码造成的，真实显示器也会这样显示：
+
+- 大片区域被 tone map 压在目标峰值上时，编码噪声和 10-bit PQ 的量化（400 nits 附近每级约 1%）会让它们解码后在峰值上下几个百分点内浮动。例如 Spider-Man HDR400 约 0.8% 的像素（天空）在 400 附近，其中约 0.3% 超过 408，但几乎没有超过 440 的。
+- 4:2:0 色度子采样和量化在高光边缘造成零星过冲，例如 Returnal HDR400 约 0.002% 的像素达到 470–690 nits。参考视频峰值远低于 ceiling 也只是提示（这几帧可能没有高光）。SDR 画面很暗时，pycvvdp 会打印 `The mean color value is less than 1`，这是它的经验性提醒，只要白色约 100 nits 就可以忽略。EXR 可以用 [tev](https://github.com/Tom94/tev) 打开，鼠标悬停可看到每个像素的 nits。
+
 ## 比较什么
 
 每个测试视频和同一目标的参考视频比较：
