@@ -175,10 +175,10 @@ class ESRGAN:
         free = torch.cuda.mem_get_info(device)[0] / 2**30
         if free < vram_gib:
             # Windows does not raise out-of-memory here: it spills into system RAM and
-            # runs many times slower, e.g. while score.py is using the GPU.
+            # runs many times slower, e.g. while score_cvvdp.py is using the GPU.
             raise RuntimeError(
                 f"{name} needs ~{vram_gib} GiB of free GPU memory, {free:.1f} GiB "
-                "free; stop other GPU jobs (e.g. score.py) first"
+                "free; stop other GPU jobs (e.g. score_cvvdp.py) first"
             )
         path = MODEL_DIR / Path(url).name
         if not path.is_file():

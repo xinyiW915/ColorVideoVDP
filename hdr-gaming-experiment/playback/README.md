@@ -14,9 +14,9 @@ python -B hdr-gaming-experiment/playback/playback.py returnal_clip_005
 python -B hdr-gaming-experiment/playback/playback.py returnal_clip_005 --parts reference --overwrite
 python -B hdr-gaming-experiment/playback/playback.py returnal_clip_005 --upscalers lanczos --heights 720 --bitrates 5
 
-# 快速检查：每个视频 60 帧，写到别的文件夹，再用 score.py 打分
+# 快速检查：每个视频 60 帧，写到别的文件夹，再用 score_cvvdp.py 打分
 python -B hdr-gaming-experiment/playback/playback.py returnal_clip_005 --frames 60 --bitrates 12 --output hdr-gaming-experiment/playback/test_output/_check
-python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --frames 60 --bitrates 12 --test-output hdr-gaming-experiment/playback/test_output/_check --results <另一个文件夹>
+python -B hdr-gaming-experiment/scoring/score_cvvdp.py returnal_clip_005 --frames 60 --bitrates 12 --test-output hdr-gaming-experiment/playback/test_output/_check --results <另一个文件夹>
 ```
 
 参数是片段名，即原片片段的文件名（不含扩展名）。输入从前两步的输出文件夹里按名字找，缺任何一个会先报错：
@@ -25,7 +25,7 @@ python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --frames 60 -
 - `compression/compression_output/tonemap_then_compress/{hdr1000,hdr400,sdr}/<片段>_<目标>_<分辨率>p_<码率>M.mp4`
 - `compression/compression_output/compress_then_tonemap/<片段>_<分辨率>p_<码率>M.mp4`
 
-ESRGAN 要用约 12 GB 显存，不要和 `score.py` 同时跑：空闲显存不够时程序会直接报错。Windows 显存不够时不会报 OOM，而是借用内存，速度会慢很多倍。
+ESRGAN 要用约 12 GB 显存，不要和 `score_cvvdp.py` 同时跑：空闲显存不够时程序会直接报错。Windows 显存不够时不会报 OOM，而是借用内存，速度会慢很多倍。
 
 ## 两条路线
 

@@ -1,7 +1,7 @@
 """Preview what ColorVideoVDP sees after the display model, and check its luminance.
 
 For each target, one playback test video and its reference are read with the same
-video source and display models as score.py, and the display-model output is
+video source and display models as score_cvvdp.py, and the display-model output is
 written by ColorVideoVDP's dm-preview "metric" as OpenEXR frames: absolute linear
 BT.709 RGB in cd/m^2, test on top, reference below.
 
@@ -23,7 +23,7 @@ import argparse
 import math
 
 import numpy as np
-from score import (
+from score_cvvdp import (
     BITRATES,
     DISPLAY_FILE,
     HEIGHTS,
