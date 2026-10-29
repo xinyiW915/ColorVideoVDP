@@ -23,7 +23,17 @@ import argparse
 import math
 
 import numpy as np
-from score import BITRATES, DISPLAY_FILE, HEIGHTS, HERE, ROUTES, TARGETS, TEST_OUTPUT
+from score import (
+    BITRATES,
+    DISPLAY_FILE,
+    HEIGHTS,
+    HERE,
+    ROUTES,
+    TARGETS,
+    TEST_OUTPUT,
+    UPSCALERS,
+    test_path,
+)
 
 LUMA = np.array([0.2126, 0.7152, 0.0722])  # Linear BT.709 RGB -> luminance
 TOLERANCE = (
@@ -59,12 +69,8 @@ def preview(clip, target, out, args):
     from pycvvdp.dm_preview_metric import dm_preview_exr_sbs
 
     display, peak = TARGETS[target]
-    test = (
-        TEST_OUTPUT
-        / args.upscaler
-        / args.route
-        / target
-        / f"{clip}_{target}_{args.height}p_{args.mbps:g}M.mp4"
+    test = test_path(
+        TEST_OUTPUT, clip, args.upscaler, args.route, target, args.height, args.mbps
     )
     reference = TEST_OUTPUT / "reference" / f"{clip}_{target}.mp4"
     missing = [str(p) for p in (test, reference) if not p.is_file()]
@@ -163,7 +169,12 @@ def main():
     parser.add_argument("--route", choices=ROUTES, default=ROUTES[0])
     parser.add_argument("--height", type=int, choices=HEIGHTS, default=2160)
     parser.add_argument("--mbps", type=float, choices=BITRATES, default=25)
-    parser.add_argument("--upscaler", default="lanczos", help="test_output subfolder")
+    parser.add_argument(
+        "--upscaler",
+        choices=UPSCALERS,
+        default=UPSCALERS[0],
+        help="test_output subfolder (2160p always comes from native/)",
+    )
     parser.add_argument(
         "--frames", type=int, default=3, help="Frames to write and check"
     )

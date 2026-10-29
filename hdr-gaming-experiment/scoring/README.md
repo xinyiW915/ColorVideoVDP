@@ -7,8 +7,11 @@
 ```powershell
 conda activate cvvdp
 
-# 一个片段的全部 54 个测试视频（600 帧，约 2 分钟一个，共约 1.8 小时）
+# 一个片段的全部 90 个测试视频（Lanczos 和 ESRGAN 各 36 个，2160p 共 18 个；600 帧，约 2 分钟一个，共约 3 小时）
 python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005
+
+# 只算一种放大方式（2160p 仍然从 native/ 读）
+python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --upscalers lanczos
 
 # 快速预览：每个视频只算前 10 帧（约 2 分钟全部算完）
 python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --frames 10
@@ -17,7 +20,9 @@ python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --frames 10
 python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --plot-only
 ```
 
-参数是片段名。`--targets`、`--heights`、`--bitrates` 可以只算一部分条件。每算完一个就写进 CSV；中断后再运行，会跳过已经用同样帧数算过的条件，`--overwrite` 强制重算。
+参数是片段名。`--targets`、`--heights`、`--bitrates`、`--upscalers` 可以只算一部分条件。每算完一个就写进 CSV；中断后再运行，会跳过已经用同样帧数算过的条件，`--overwrite` 强制重算。`--test-output` 改读别的播放版文件夹（例如 `playback.py --output` 写出的测试结果），`--results` 改 CSV 和图的输出文件夹。
+
+ESRGAN 播放版和打分都要用 GPU：不要和 `playback.py` 的 ESRGAN 同时跑（Windows 显存不够时会借用内存，慢很多倍）。
 
 ## 检查显示器模型（dm-preview）
 
@@ -27,7 +32,7 @@ python -B hdr-gaming-experiment/scoring/score.py returnal_clip_005 --plot-only
 python -B hdr-gaming-experiment/scoring/preview.py returnal_clip_005
 ```
 
-每个目标抽一个测试视频（默认先 TM、2160p、25 Mbps，`--route`、`--height`、`--mbps` 可改），和 `score.py` 用同样的方式读入，用 ColorVideoVDP 的 `dm-preview` 把前 3 帧（`--frames`）存成 OpenEXR：绝对线性 BT.709 RGB，单位 cd/m²，上半是测试视频，下半是参考视频。文件在 `scoring/dm_preview/<片段>/`，已在 `.gitignore` 里，不进 git。
+每个目标抽一个测试视频（默认先 TM、2160p、25 Mbps，`--route`、`--height`、`--mbps`、`--upscaler` 可改；2160p 从 `native/` 读），和 `score.py` 用同样的方式读入，用 ColorVideoVDP 的 `dm-preview` 把前 3 帧（`--frames`）存成 OpenEXR：绝对线性 BT.709 RGB，单位 cd/m²，上半是测试视频，下半是参考视频。文件在 `scoring/dm_preview/<片段>/`，已在 `.gitignore` 里，不进 git。
 
 终端会打印测试和参考视频的亮度（最小、中位数、99.9%、最大），以及显示器模型能输出的范围：
 
@@ -47,9 +52,11 @@ python -B hdr-gaming-experiment/scoring/preview.py returnal_clip_005
 
 | 测试视频 | 参考视频 |
 |---|---|
-| `test_output/lanczos/{tonemap_then_compress,compress_then_tonemap}/hdr1000/` | `test_output/reference/<片段>_hdr1000.mp4` |
+| `test_output/{lanczos,esrgan,native}/{tonemap_then_compress,compress_then_tonemap}/hdr1000/` | `test_output/reference/<片段>_hdr1000.mp4` |
 | `.../hdr400/` | `test_output/reference/<片段>_hdr400.mp4` |
 | `.../sdr/` | `test_output/reference/<片段>_sdr.mp4` |
+
+720p 和 1080p 在 `lanczos/`、`esrgan/` 里各有一份。2160p 不放大，只在 `native/` 里有一份，只打一次分（CSV 里放大方式记为 `native`），两种放大方式的汇总表和图都用这个分数。
 
 ## 显示器模型
 
@@ -73,12 +80,14 @@ python -B hdr-gaming-experiment/scoring/preview.py returnal_clip_005
 
 | 文件 | 内容 |
 |---|---|
-| `<片段>_cvvdp.csv` | 每行一个测试视频：路线、目标、分辨率、码率、帧数、JOD、显示器模型、文件路径 |
-| `<片段>_jod_vs_bitrate.png` | JOD 随码率的变化；每个目标一张小图，实线先 TM，虚线先压缩，颜色是分辨率 |
-| `<片段>_route_difference.png` | 先 TM 的 JOD 减先压缩的 JOD；0 线上方表示先 TM 更好，灰带是 ±0.2 JOD 的参考范围（不是严格阈值） |
-| `<片段>_route_scatter.png` | 同一个比较的散点图：横轴先压缩，纵轴先 TM，对角线上方表示先 TM 更好；形状是码率 |
-| `<片段>_peak_luminance.png` | JOD 随峰值亮度（SDR 100 / HDR400 / HDR1000）的变化；行是路线，列是码率 |
+| `<片段>_cvvdp.csv` | 每行一个测试视频：放大方式（`lanczos` / `esrgan` / `native`）、路线、目标、分辨率、码率、帧数、JOD、显示器模型、文件路径 |
+| `<片段>_<放大方式>_jod_vs_bitrate.png` | JOD 随码率的变化；每个目标一张小图，实线先 TM，虚线先压缩，颜色是分辨率 |
+| `<片段>_<放大方式>_route_difference.png` | 先 TM 的 JOD 减先压缩的 JOD；0 线上方表示先 TM 更好，灰带是 ±0.2 JOD 的参考范围（不是严格阈值） |
+| `<片段>_<放大方式>_route_scatter.png` | 同一个比较的散点图：横轴先压缩，纵轴先 TM，对角线上方表示先 TM 更好；形状是码率 |
+| `<片段>_<放大方式>_peak_luminance.png` | JOD 随峰值亮度（SDR 100 / HDR400 / HDR1000）的变化；行是路线，列是码率 |
+| `<片段>_upscaler_comparison.png` | 两种放大方式放在同一张图里：JOD 随码率的变化；行是路线，列是目标，实线 Lanczos-5，虚线 Real-ESRGAN，颜色是分辨率；2160p 不放大，画成一条绿色点线作为对照 |
+| `<片段>_upscaler_difference.png` | Real-ESRGAN 的 JOD 减 Lanczos-5 的 JOD（720p 和 1080p）；0 线上方表示 ESRGAN 更好，灰带是 ±0.2 JOD |
 
-运行结束后终端还会打印每个目标的汇总表（先 TM / 先压缩 / 差值）。
+每种放大方式一套图，2160p 的点在两套图里相同。最后两张对比图只在 `--upscalers` 两种都选时才画（默认两种都选），每个片段共 10 张图。运行结束后终端还会打印每种放大方式、每个目标的汇总表（先 TM / 先压缩 / 差值）。
 
-解读时注意：HDR1000 和 HDR400 用同一套 tone map 曲线，主要只差峰值亮度；SDR 和 HDR 之间还有 tone map 曲线（ACES）、位深（8-bit）和颜色格式的不同。播放版用 CRF 12 保存，这一步本身约损失 0.4 JOD（HDR），参考和测试视频都经过这一步。
+解读时注意：HDR1000 和 HDR400 用同一套 tone map 曲线，主要只差峰值亮度；SDR 和 HDR 之间还有 tone map 曲线（ACES）、位深（8-bit）和颜色格式的不同。两条路线的 tone map 位置不同：先 TM 是服务器端 tone map，在缩小和压缩之前；先压缩是客户端或显示器 tone map，在解码和放大到 4K 之后（见 `playback/README.md`）。播放版用 x265 CRF 10 保存，参考和测试视频都经过这一步；只看前 30 帧时它相对无损版约为 9.92 JOD（HDR）、9.98 JOD（SDR），完整 600 帧还没测。
